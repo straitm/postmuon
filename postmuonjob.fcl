@@ -1,0 +1,60 @@
+#include "foo.fcl"
+#include "services.fcl"
+#include "LiveGeometry.fcl"
+#include "BackTracker.fcl"
+
+process_name: Hits
+
+
+matt_geo : @local::standard_livegeo
+matt_geo.CheckBadChannels: false
+services.Geometry: matt_geo
+
+
+services:
+{
+  # Load the service that manages root files for histograms.
+  TFileService: { fileName: "histos.root"            }
+  scheduler:    { wantSummary: true }
+  @table::standard_services
+  BackTracker: @local::standard_backtracker
+}
+
+#Start each new event with an empty event.
+source:
+{
+  module_type: RootInput
+  maxEvents: -1
+}
+
+# Define and configure some modules to do work on each event.
+# First modules are defined; they are scheduled later.
+# Modules are grouped by type.
+physics:
+{
+
+ analyzers:
+ {
+  foo: @local::standard_foo
+ }
+
+# filters:{}
+
+ #list the modules for this path, order matters, filters reject all following items
+ hitmaker: [ foo ]
+ stream1:  [ out1 ] 
+ 
+ #end_path are things that do not modify art::Event, includes analyzers and output modules. 
+ #all items here can be run simultaneously
+ end_paths:     [hitmaker, stream1]  
+}
+
+outputs:
+{
+ out1:
+  {
+   module_type: RootOutput
+   fileName:    "foo.root" #default file name, can override from command line with -o or --output
+   fastCloning: false
+  }
+}

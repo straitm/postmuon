@@ -1,0 +1,11 @@
+BEGIN_PROLOG
+
+standard_foo:
+{
+ module_type:      foo
+ RemoveBadChans:   true   #take out bad channels?
+ RawDataLabel:    "calhit"
+}
+
+END_PROLOG
+

@@ -16,9 +16,6 @@
 #include "RecoBase/Track.h"
 
 #include "Simulation/ParticleNavigator.h"
-#include "MCCheater/BackTracker.h"
-
-#include "TGeoMaterial.h"
 
 #include <string>
 
@@ -152,6 +149,7 @@ void PostMuon::analyze(const art::Event& evt)
   evt.getByLabel("kalmantrackmerge", tracks);
 
   for(unsigned int t = 0; t < 1 && t < tracks->size(); t++){
+    printf("I have a track\n");
     {
       static int HQNLM = printf(
         "event:truemicheltime:xrayhits:ntrueneutrons:neutrone:pvc:"

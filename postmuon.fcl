@@ -1,8 +1,8 @@
 BEGIN_PROLOG
 
-standard_foo:
+standard_postmuon:
 {
- module_type:      foo
+ module_type:      postmuon
  RemoveBadChans:   true   #take out bad channels?
  RawDataLabel:    "calhit"
 }

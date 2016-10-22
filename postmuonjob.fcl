@@ -1,14 +1,14 @@
-#include "foo.fcl"
+#include "postmuon.fcl"
 #include "services.fcl"
 #include "LiveGeometry.fcl"
 #include "BackTracker.fcl"
+#include "CalHit.fcl"
+#include "Slicer4D.fcl"
+#include "KalmanTrack.fcl"
+#include "KalmanTrackMerge.fcl"
 
-process_name: Hits
 
-
-matt_geo : @local::standard_livegeo
-matt_geo.CheckBadChannels: false
-services.Geometry: matt_geo
+process_name: PostMuonProcessFTW
 
 
 services:
@@ -16,8 +16,9 @@ services:
   # Load the service that manages root files for histograms.
   TFileService: { fileName: "histos.root"            }
   scheduler:    { wantSummary: true }
+  message:      @local::standard_out
+  TimeTracker: {}
   @table::standard_services
-  BackTracker: @local::standard_backtracker
 }
 
 #Start each new event with an empty event.
@@ -33,20 +34,26 @@ source:
 physics:
 {
 
- analyzers:
+ producers:
  {
-  foo: @local::standard_foo
+   calhit:           @local::standard_calhit
+   slicer:           @local::standard_slicer4d
+   kalmantrack:      @local::standard_kalmantrack
+   kalmantrackmerge: @local::standard_kalmantrackmerge
  }
 
-# filters:{}
+ analyzers:
+ {
+   postmuon:         @local::standard_postmuon
+ }
 
- #list the modules for this path, order matters, filters reject all following items
- hitmaker: [ foo ]
- stream1:  [ out1 ] 
- 
+ reco: [calhit, slicer, kalmantrack, kalmantrackmerge ]
+
+ stream1: [ postmuon, out1 ]
+
  #end_path are things that do not modify art::Event, includes analyzers and output modules. 
  #all items here can be run simultaneously
- end_paths:     [hitmaker, stream1]  
+ end_paths:     [ stream1 ]  
 }
 
 outputs:
@@ -54,7 +61,7 @@ outputs:
  out1:
   {
    module_type: RootOutput
-   fileName:    "foo.root" #default file name, can override from command line with -o or --output
+   fileName:    "postmuon.root" #default file name, can override from command line with -o or --output
    fastCloning: false
   }
 }

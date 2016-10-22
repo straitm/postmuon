@@ -1,25 +1,19 @@
 ////////////////////////////////////////////////////////////////////////
-/// \brief   This module is named foo and does bar.
+/// \brief   This module is named PostMuon and does bar.
 /// \author  M. Strait
 /// \date
 ////////////////////////////////////////////////////////////////////////
 
-// Framework includes
+#include "art/Framework/Principal/Run.h"
+#include "art/Framework/Principal/Event.h"
+#include "art/Framework/Services/Registry/ServiceHandle.h"
 #include "art/Framework/Principal/Handle.h"
 #include "fhiclcpp/ParameterSet.h"
 #include "art/Framework/Core/ModuleMacros.h"
 
-#include "MEFinder/MEClusters.h"
-#include "Simulation/FLSHitList.h"
-#include "Geometry/Geometry.h"
-#include "Calibrator/Calibrator.h"
-#include "ChannelInfo/BadChanList.h"
-#include "CalibrationUtils/CalibUtil.h"
 #include "RecoBase/CellHit.h"
 #include "RecoBase/RecoHit.h"
 #include "RecoBase/Track.h"
-#include "Simulation/Particle.h"
-#include "RunHistory/service/RunHistoryService.h"
 
 #include "Simulation/ParticleNavigator.h"
 #include "MCCheater/BackTracker.h"
@@ -34,14 +28,14 @@
 
 
 /// Calibrating RawData to Produce CellHits
-namespace foo {
+namespace PostMuon {
 
-  class foo : public art::EDAnalyzer {
+  class PostMuon : public art::EDAnalyzer {
 
   public:
 
-    explicit foo(fhicl::ParameterSet const& pset);
-    virtual ~foo();
+    explicit PostMuon(fhicl::ParameterSet const& pset);
+    virtual ~PostMuon();
 
     void analyze(const art::Event& evt);
 
@@ -50,7 +44,7 @@ namespace foo {
     int         fRemoveBadChans; ///< whether to remove bad channels
     std::string fRawDataLabel;   ///< label of where to find RawData
 
-  }; // class foo
+  }; // class PostMuon
 }
 
 
@@ -131,21 +125,21 @@ static double hits_near_track_end(const rb::Track & trk,
   return -999;
 }
 
-namespace foo{
+namespace PostMuon{
 
-foo::foo(fhicl::ParameterSet const& pset)
+PostMuon::PostMuon(fhicl::ParameterSet const& pset)
   : EDAnalyzer(pset), fRemoveBadChans(pset.get<bool>("RemoveBadChans")),
   fRawDataLabel(pset.get< std::string >("RawDataLabel"))
 {
-  TargetCount tc(-1);
+  
 }
 
 //......................................................................
-foo::~foo() { }
+PostMuon::~PostMuon() { }
 
 //......................................................................
 
-void foo::analyze(const art::Event& evt)
+void PostMuon::analyze(const art::Event& evt)
 {
   // I'm so sorry that I have to do this.  And, my goodness, doing
   // it in the constructor isn't sufficient.
@@ -156,9 +150,6 @@ void foo::analyze(const art::Event& evt)
 
   art::Handle< std::vector<rb::Track> > tracks;
   evt.getByLabel("kalmantrackmerge", tracks);
-
-  art::Handle< std::vector<sim::FLSHitList> > flshits;
-  evt.getByLabel("geantgen", flshits);
 
   for(unsigned int t = 0; t < 1 && t < tracks->size(); t++){
     {
@@ -173,13 +164,13 @@ void foo::analyze(const art::Event& evt)
     const rb::Track & trk = (*tracks)[t];
 
     for(int c = 0; c < (int)trk.NCell(); c++){
-      const rb::CellHit & chit = *(trk.Cell(c));
+      //const rb::CellHit & chit = *(trk.Cell(c));
 
     }
   }
 }
 
-DEFINE_ART_MODULE(foo);
+DEFINE_ART_MODULE(PostMuon);
 
-} // end namespace foo
+} // end namespace PostMuon
 //////////////////////////////////////////////////////////////////////////

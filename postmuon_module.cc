@@ -60,66 +60,53 @@ static bool hit_is_in_track(const rb::CellHit & chit,
   return false;
 }
 
-// Returns time between a stray hit near the end of a track that might
-// be from an x-ray and the time of the end of the track.  If there are
-// no such hits, returns -999.
-static double hits_near_track_end(const rb::Track & trk,
+
+__attribute__((unused)) static double kUSEC_PER_TDC = 1./64.;
+
+static bool hit_near_track_end_and_after_it(const rb::Track & trk,
   const int lasthiti_even, const int lasthiti_odd, 
-  const art::Handle< std::vector<rb::CellHit> > & cellcol)
+  const art::Handle< std::vector<rb::CellHit> > & cellcol,
+  const int celli)
 {
-  // for each view, check for small stray hits near
-  // track end and in time with the track.
+  const rb::CellHit & chit = (*cellcol)[celli];
+
+  if(hit_is_in_track(chit, trk)) return false;
+
+  const int afterplane = chit.Plane();
+  const int aftercell  = chit.Cell();
+  const int aftertdc   = chit.TDC();
 
   const int lastplane_even = trk.Cell(lasthiti_even)->Plane();
-  const int lastcell_even = trk.Cell(lasthiti_even)->Cell();
-  const int lastplane_odd = trk.Cell(lasthiti_odd)->Plane();
-  const int lastcell_odd = trk.Cell(lasthiti_odd)->Cell();
+  const int lastplane_odd =  trk.Cell(lasthiti_odd) ->Plane();
+  const int lastcell_even =  trk.Cell(lasthiti_even)->Cell();
+  const int lastcell_odd =   trk.Cell(lasthiti_odd) ->Cell();
 
-  const double mev_per_adc_even =
-    1000*trk.RecoHit(lasthiti_even).GeV()/trk.Cell(lasthiti_even)->ADC();
-  const double mev_per_adc_odd  =
-    1000*trk.RecoHit(lasthiti_odd ).GeV()/trk.Cell(lasthiti_odd )->ADC();
+  const int tracktime = (trk.Cell(lasthiti_even)->TDC() +
+                         trk.Cell(lasthiti_odd )->TDC())/2.;
 
-  __attribute__((unused)) static double kUSEC_PER_TDC = 1./64.;
+  const bool after = tracktime < aftertdc;
 
-  const double lasttime = kUSEC_PER_TDC * (trk.Cell(lasthiti_even)->TDC() +
-                                           trk.Cell(lasthiti_odd )->TDC())/2.;
+  //if(!after) return false;
 
-  for(unsigned int i = 0; i < cellcol->size(); i++){
-    const rb::CellHit & chit = (*cellcol)[i];
-    if(hit_is_in_track(chit, trk)) continue;
+  const double maxdist_in_cells = 8.1; // maybe reasonable? 
 
-    const double maxdist = 6.1; // maybe reasonable?  Mean free path is ~25cm
-    // must not be directly adjacent to track end (i.e. a reco failure)
-    const double mindist = sqrt(2*2*1.5*1.5 + 1) + 0.01;
-    const double max_dt = 0.5; // ok? Dunno.
-    const int max_mev = 6.0;
+  const double dist = 
+    chit.Plane()%2 == 0 ?
+    //         XXX
+      sqrt(pow(1.5*(afterplane - lastplane_even), 2) + 
+           pow(     aftercell  - lastcell_even  , 2))
+   :  sqrt(pow(1.5*(afterplane - lastplane_odd ), 2) + 
+           pow(     aftercell  - lastcell_odd   , 2));
 
-    const double dist = 
-      chit.Plane()%2 == 0 ?
-        sqrt(pow(1.5*(chit.Plane() - lastplane_even), 2) + 
-             pow(     chit.Cell () - lastcell_even  , 2))
-     :  sqrt(pow(1.5*(chit.Plane() - lastplane_odd ), 2) + 
-             pow(     chit.Cell () - lastcell_odd   , 2));
 
-    const bool right_dist = dist < maxdist && dist > mindist;
+  // Hits too close, but otherwise correct, probably signal that we
+  // are picking up a Michel decay.  Bail out.
+  if(dist > maxdist_in_cells) return false;
 
-    const bool close_in_time = fabs(lasttime - kUSEC_PER_TDC * chit.TDC()) < max_dt;
-
-    const double mev = chit.ADC() * (chit.Plane()%2 == 0? mev_per_adc_even
-                                                        : mev_per_adc_odd);
-
-    const bool right_energy = mev < max_mev;
-
-    if(right_dist && close_in_time && right_energy)
-      return lasttime - kUSEC_PER_TDC * chit.TDC();
-
-    // Hits too close, but otherwise correct, probably signal that we
-    // are picking up a Michel decay.  Bail out.
-    if(dist < mindist && close_in_time && right_energy) return -999;
-  }
-
-  return -999;
+  printf("ntuple: %f %f\n",
+         tracktime*kUSEC_PER_TDC,
+         (aftertdc - tracktime)*kUSEC_PER_TDC);
+  return true;
 }
 
 namespace PostMuon{
@@ -149,21 +136,40 @@ void PostMuon::analyze(const art::Event& evt)
   evt.getByLabel("kalmantrackmerge", tracks);
 
   for(unsigned int t = 0; t < 1 && t < tracks->size(); t++){
-    printf("I have a track\n");
     {
       static int HQNLM = printf(
-        "event:truemicheltime:xrayhits:ntrueneutrons:neutrone:pvc:"
-        "endx:endy:endz:costheta:heavy"
-        ":e1:dedx1:plane1:cell1:truedx1:trueebirks1:truee1"
-        ":e0:dedx0:plane0:cell0:truedx0:trueebirks0:truee0\n");
+        "event:truemicheltime"
+        "\n"
+        );
       HQNLM++;
     }
 
     const rb::Track & trk = (*tracks)[t];
 
-    for(int c = 0; c < (int)trk.NCell(); c++){
-      //const rb::CellHit & chit = *(trk.Cell(c));
+    // XXX southward tracks are wrong now, needs fix
+    int lasthiti_even = 0;
+    int lastplane_even = 0;
+    int lasthiti_odd = 0;
+    int lastplane_odd = 0;
 
+    for(int c = 0; c < (int)trk.NCell(); c++){
+      const rb::CellHit & chit = *(trk.Cell(c));
+
+      if(chit.Plane()%2 == 0 && chit.Plane() > lastplane_even){
+        lasthiti_even = c;
+        lastplane_even = chit.Plane();
+      }
+
+      if(chit.Plane()%2 == 1 && chit.Plane() > lastplane_odd){
+        lasthiti_odd = c;
+        lastplane_odd = chit.Plane();
+      }
+    }
+
+    for(int c = 0; c < (int)(*cellcol).size(); c++){
+      if(hit_near_track_end_and_after_it(
+        trk, lasthiti_even, lasthiti_odd, cellcol, c)){
+      }
     }
   }
 }

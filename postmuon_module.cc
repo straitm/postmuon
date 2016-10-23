@@ -84,28 +84,38 @@ static bool hit_near_track_end_and_after_it(const rb::Track & trk,
   const int tracktime = (trk.Cell(lasthiti_even)->TDC() +
                          trk.Cell(lasthiti_odd )->TDC())/2.;
 
-  const bool after = tracktime < aftertdc;
+  //const bool after = tracktime < aftertdc;
 
   //if(!after) return false;
 
   const double maxdist_in_cells = 8.1; // maybe reasonable? 
 
+  // Geometrically about correct, but perhaps should be scaled by density or
+  // radiation length or neutron cross section or something.  Or not, since
+  // which of those is right depends on what you're looking at.
+  const double planes_per_cell = 76./39.;
+
   const double dist = 
     chit.Plane()%2 == 0 ?
-    //         XXX
-      sqrt(pow(1.5*(afterplane - lastplane_even), 2) + 
-           pow(     aftercell  - lastcell_even  , 2))
-   :  sqrt(pow(1.5*(afterplane - lastplane_odd ), 2) + 
-           pow(     aftercell  - lastcell_odd   , 2));
+      sqrt(pow(planes_per_cell*(afterplane - lastplane_even), 2) + 
+           pow(                 aftercell  - lastcell_even  , 2))
+   :  sqrt(pow(planes_per_cell*(afterplane - lastplane_odd ), 2) + 
+           pow(                 aftercell  - lastcell_odd   , 2));
 
 
   // Hits too close, but otherwise correct, probably signal that we
   // are picking up a Michel decay.  Bail out.
   if(dist > maxdist_in_cells) return false;
 
-  printf("ntuple: %f %f\n",
+  printf("ntuple: %f %f %f %f %f %f %d\n",
          tracktime*kUSEC_PER_TDC,
-         (aftertdc - tracktime)*kUSEC_PER_TDC);
+         (aftertdc - tracktime)*kUSEC_PER_TDC,
+         trk.Stop().X(), trk.Stop().Y(), trk.Stop().Z(),
+         dist,
+
+         // Would be nice to find the energy as in a RecoHit, but
+         // takes some work since no existing code gives it a W position.
+         chit.ADC());
   return true;
 }
 
@@ -138,7 +148,7 @@ void PostMuon::analyze(const art::Event& evt)
   for(unsigned int t = 0; t < 1 && t < tracks->size(); t++){
     {
       static int HQNLM = printf(
-        "event:truemicheltime"
+        "ntuple: trktime:t:trkx:trky:trkz:dist:adc"
         "\n"
         );
       HQNLM++;
@@ -146,7 +156,8 @@ void PostMuon::analyze(const art::Event& evt)
 
     const rb::Track & trk = (*tracks)[t];
 
-    // XXX southward tracks are wrong now, needs fix
+    const bool south = trk.Dir().Z() < 0;
+
     int lasthiti_even = 0;
     int lastplane_even = 0;
     int lasthiti_odd = 0;
@@ -155,12 +166,12 @@ void PostMuon::analyze(const art::Event& evt)
     for(int c = 0; c < (int)trk.NCell(); c++){
       const rb::CellHit & chit = *(trk.Cell(c));
 
-      if(chit.Plane()%2 == 0 && chit.Plane() > lastplane_even){
+      if(chit.Plane()%2 == 0 && (south ^ (chit.Plane() > lastplane_even))){
         lasthiti_even = c;
         lastplane_even = chit.Plane();
       }
 
-      if(chit.Plane()%2 == 1 && chit.Plane() > lastplane_odd){
+      if(chit.Plane()%2 == 1 && (south ^ (chit.Plane() > lastplane_odd))){
         lasthiti_odd = c;
         lastplane_odd = chit.Plane();
       }

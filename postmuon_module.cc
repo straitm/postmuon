@@ -107,6 +107,8 @@ static bool hit_near_track_end_and_after_it(const rb::Track & trk,
   // are picking up a Michel decay.  Bail out.
   if(dist > maxdist_in_cells) return false;
 
+  // XXX need to account for two adjacent hits in time and not independently
+  // report them.
   printf("ntuple: %f %f %f %f %f %f %d\n",
          tracktime*kUSEC_PER_TDC,
          (aftertdc - tracktime)*kUSEC_PER_TDC,
@@ -156,24 +158,24 @@ void PostMuon::analyze(const art::Event& evt)
 
     const rb::Track & trk = (*tracks)[t];
 
-    const bool south = trk.Dir().Z() < 0;
+    int lasthiti_even = 0, lasthiti_odd = 0;
 
-    int lasthiti_even = 0;
-    int lastplane_even = 0;
-    int lasthiti_odd = 0;
-    int lastplane_odd = 0;
+    {
+      float lowest_even = 1e30, lowest_odd = 1e30;
 
-    for(int c = 0; c < (int)trk.NCell(); c++){
-      const rb::CellHit & chit = *(trk.Cell(c));
+      for(int c = 0; c < (int)trk.NCell(); c++){
+        const rb::CellHit & chit = *(trk.Cell(c));
+        const rb::RecoHit rhit = trk.RecoHit(c);
 
-      if(chit.Plane()%2 == 0 && (south ^ (chit.Plane() > lastplane_even))){
-        lasthiti_even = c;
-        lastplane_even = chit.Plane();
-      }
+        if(chit.Plane()%2 == 0 && rhit.Y() < lowest_even){
+          lasthiti_even = c;
+          lowest_even = rhit.Y();
+        }
 
-      if(chit.Plane()%2 == 1 && (south ^ (chit.Plane() > lastplane_odd))){
-        lasthiti_odd = c;
-        lastplane_odd = chit.Plane();
+        if(chit.Plane()%2 == 1 && rhit.Y() < lowest_odd){
+          lasthiti_odd = c;
+          lowest_even = rhit.Y();
+        }
       }
     }
 

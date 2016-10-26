@@ -6,10 +6,9 @@
 #include "Slicer4D.fcl"
 #include "KalmanTrack.fcl"
 #include "KalmanTrackMerge.fcl"
-
+#include "Calibrator.fcl"
 
 process_name: PostMuonProcessFTW
-
 
 services:
 {
@@ -17,6 +16,7 @@ services:
   TFileService: { fileName: "histos.root"            }
   scheduler:    { wantSummary: true }
   message:      @local::standard_out
+  Calibrator:   @local::standard_calibrator
   TimeTracker: {}
   @table::standard_services
 }

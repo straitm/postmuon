@@ -17,6 +17,7 @@
 #include "Calibrator/Calibrator.h"
 
 #include "Simulation/ParticleNavigator.h"
+#include "RawData/RawTrigger.h"
 
 #include <string>
 #include <algorithm>
@@ -47,23 +48,8 @@ namespace PostMuon {
 }
 
 
-__attribute__((unused)) static bool hit_is_in_track(const rb::CellHit & chit,
-                                                    const rb::Track & trk)
-{
-  for(unsigned int i = 0; i < trk.NCell(); i++){
-    const rb::CellHit & trk_chit = *(trk.Cell(i));
-
-    // Maybe not strictly true as there could be more than one hit in the same
-    // cell at different times, but let's not worry about that now.
-    // Also exclude hits that are directly adjacent to track hits.
-    if(abs(trk_chit.Plane() - chit.Plane()) <= 2 &&
-       abs(trk_chit. Cell() - chit.Cell ()) <= 1) return true;
-  }
-  return false;
-}
-
-
-__attribute__((unused)) static double kUSEC_PER_TDC = 1./64.;
+static double kUSEC_PER_TDC = 1./64.;
+static double kUSEC_PER_MICROSLICE = 0.5; // XXX right?
 
 // Geometrically about correct, but perhaps should be scaled by density or
 // radiation length or neutron cross section or something.  Or not, since
@@ -80,66 +66,20 @@ static float dist_trackend_to_cell(const rb::Track & trk,
   const int lastcell_even =  trk.Cell(lasthiti_even)->Cell();
   const int lastcell_odd =   trk.Cell(lasthiti_odd) ->Cell();
 
+  const bool claimed_increasing_z = trk.Stop().Z() > trk.Start().Z();
+  const bool flip = trk.Stop().Y() > trk.Start().Y();
+
+  const bool increasing_z = claimed_increasing_z ^ flip;
+
+  const int lastplane = increasing_z?std::max(lastplane_even, lastplane_odd) 
+                                    :std::min(lastplane_even, lastplane_odd);
+
   return
     chit.Plane()%2 == 0 ?
-      sqrt(pow(planes_per_cell*(chit.Plane() - lastplane_even), 2) + 
-           pow(                 chit.Cell()  - lastcell_even  , 2))
-   :  sqrt(pow(planes_per_cell*(chit.Plane() - lastplane_odd ), 2) + 
-           pow(                 chit.Cell()  - lastcell_odd   , 2));
-
-}
-
-static bool hit_near_track(const rb::Track & trk,
-  const int lasthiti_even, const int lasthiti_odd, 
-  const art::Handle< std::vector<rb::CellHit> > & cellcol,
-  const int celli)
-{
-  const rb::CellHit & chit = (*cellcol)[celli];
-
-  const int tracktime = (trk.Cell(lasthiti_even)->TDC() +
-                         trk.Cell(lasthiti_odd )->TDC())/2;
-
-  const int aftertdc = chit.TDC();
-  if(aftertdc < tracktime) return false;
-
-  // Accept the hit even if it is in the track!  Because if a Michel
-  // hit gets swept up into the track, this is the only way to see it.
-  //if(hit_is_in_track(chit, trk)) return false;
-
-  // Enough to catch ~99% of gammas from neutron capture according to my toy MC
-  const double maxdist_in_cells = 20.1;
-
-  const double dist = dist_trackend_to_cell(trk, chit, lasthiti_even,
-                                            lasthiti_odd);
-
-
-  // Hits too close, but otherwise correct, probably signal that we
-  // are picking up a Michel decay.  Bail out.
-  if(dist > maxdist_in_cells) return false;
-
-  return true;
-}
-
-static void last_hits(int & lasthiti_even,
-                      int & lasthiti_odd,
-                      const rb::Track & trk)
-{
-  float lowest_even = 1e30, lowest_odd = 1e30;
-
-  for(int c = 0; c < (int)trk.NCell(); c++){
-    const rb::CellHit & chit = *(trk.Cell(c));
-    const rb::RecoHit rhit = trk.RecoHit(c);
-
-    if(chit.Plane()%2 == 0 && rhit.Y() < lowest_even){
-      lasthiti_even = c;
-      lowest_even = rhit.Y();
-    }
-
-    if(chit.Plane()%2 == 1 && rhit.Y() < lowest_odd){
-      lasthiti_odd = c;
-      lowest_even = rhit.Y();
-    }
-  }
+      sqrt(pow(planes_per_cell*(chit.Plane() - lastplane)   , 2) + 
+           pow(                 chit.Cell()  - lastcell_even, 2))
+   :  sqrt(pow(planes_per_cell*(chit.Plane() - lastplane)   , 2) + 
+           pow(                 chit.Cell()  - lastcell_odd , 2));
 }
 
 /*
@@ -165,26 +105,99 @@ static int mean_late_track_time(const rb::Track & trk)
   return int(acc / std::min(max_for_avg, (int)tdcs.size()) + 0.5); 
 }
 
-static void print_ntuple_line(const rb::Track & trk,
-                              const rb::CellHit & chit,
-                              const int asum,
+/*
+ If the hit is near the track and after it in time, return the distance
+ in cells (where a plane is ~2 cells).  Otherwise, return -1.
+*/
+static double hit_near_track(const rb::Track & trk,
+  const int lasthiti_even, const int lasthiti_odd, 
+  const art::Handle< std::vector<rb::CellHit> > & cellcol,
+  const int celli)
+{
+  const rb::CellHit & chit = (*cellcol)[celli];
+
+  const int tracktime = mean_late_track_time(trk);
+
+  const int aftertdc = chit.TDC();
+  if(aftertdc < tracktime) return -1;
+
+  // Accept the hit even if it is in the track!  Because if a Michel
+  // hit gets swept up into the track, this is the only way to see it.
+  //if(hit_is_in_track(chit, trk)) return -1;
+
+  // Enough to catch ~99% of gammas from neutron capture according to my toy MC
+  const double maxdist_in_cells = 20.1;
+
+  const double dist = dist_trackend_to_cell(trk, chit, lasthiti_even,
+                                            lasthiti_odd);
+
+
+  // Hits too close, but otherwise correct, probably signal that we
+  // are picking up a Michel decay.  Bail out.
+  if(dist > maxdist_in_cells) return -1;
+
+  return dist;
+}
+
+static void last_hits(int & lasthiti_even,
+                      int & lasthiti_odd,
+                      const rb::Track & trk)
+{
+  float lowest_even = 1e30, lowest_odd = 1e30;
+
+  const bool claimed_increasing_z = trk.Stop().Z() > trk.Start().Z();
+  const bool flip = trk.Stop().Y() > trk.Start().Y();
+  const bool increasing_z = claimed_increasing_z ^ flip;
+
+  for(int c = 0; c < (int)trk.NCell(); c++){
+    const rb::CellHit & chit = *(trk.Cell(c));
+    const rb::RecoHit rhit = trk.RecoHit(c);
+
+    if(chit.Plane()%2 == 0 && (!increasing_z ^ (rhit.Z() > lowest_even))){
+      lasthiti_even = c;
+      lowest_even = rhit.Z();
+    }
+
+    if(chit.Plane()%2 == 1 && (!increasing_z ^ (rhit.Z() > lowest_odd))){
+      lasthiti_odd = c;
+      lowest_odd = rhit.Z();
+    }
+  }
+}
+
+static void print_ntuple_line(const art::Event & evt,
+                              const rb::Track & trk,
+                              const double eventlength,
+                              const double meandist2,
+                              const int hittime_tdc,
+                              const int asum,  // XXX too many parameters...
                               const float esum,
                               const int cluster_i,
                               const int cluster_nhit)
 {
-
-  int lasthiti_even = 0, lasthiti_odd = 0;
-  last_hits(lasthiti_even, lasthiti_odd, trk);
-  const double dist = dist_trackend_to_cell(
-    trk, chit, lasthiti_even, lasthiti_odd);
-
   const int tracktime = mean_late_track_time(trk);
+  const double timeleft = eventlength - tracktime *kUSEC_PER_TDC;
 
-  printf("ntuple: %d %f %f %f %f %f %f %d %f %d\n",
-    cluster_i,    tracktime *kUSEC_PER_TDC,
-    (chit.TDC() - tracktime)*kUSEC_PER_TDC,
-    trk.Stop().X(), trk.Stop().Y(), trk.Stop().Z(),
-    dist, asum, esum, cluster_nhit);
+  const bool flip = trk.Stop().Y() > trk.Start().Y();
+
+  const double tx = flip? trk.Start().X(): trk.Stop().X();
+  const double ty = flip? trk.Start().Y(): trk.Stop().Y();
+  const double tz = flip? trk.Start().Z(): trk.Stop().Z();
+
+  const double tsx = flip? trk.Stop().X(): trk.Start().X();
+  const double tsy = flip? trk.Stop().Y(): trk.Start().Y();
+  const double tsz = flip? trk.Stop().Z(): trk.Start().Z();
+
+  printf("ntuple: %d %d %d %f "
+                 "%f %f %f "
+                 "%f %f %f "
+                 "%f %d %f %d %f\n",
+    evt.run(), evt.event(),
+    cluster_i,
+    (hittime_tdc - tracktime)*kUSEC_PER_TDC,
+    tsx, tsy, tsz,
+    tx, ty, tz,
+    meandist2, asum, esum, cluster_nhit, timeleft);
 }
 
 namespace PostMuon{
@@ -196,6 +209,11 @@ PostMuon::PostMuon(fhicl::ParameterSet const& pset)
   
 }
 
+static bool compare_cellhit(const rb::CellHit & a, const rb::CellHit & b)
+{
+  return a.TDC() < b.TDC();
+}
+
 PostMuon::~PostMuon() { }
 
 void PostMuon::analyze(const art::Event& evt)
@@ -203,6 +221,9 @@ void PostMuon::analyze(const art::Event& evt)
   // I'm so sorry that I have to do this.  And, my goodness, doing
   // it in the constructor isn't sufficient.
   signal(SIGPIPE, SIG_DFL);
+
+  art::Handle< std::vector<rawdata::RawTrigger> > rawtrigger;
+  evt.getByLabel("daq", rawtrigger);
 
   art::Handle< std::vector<rb::CellHit> > cellcol; // get hits
   evt.getByLabel(fRawDataLabel, cellcol);
@@ -212,11 +233,16 @@ void PostMuon::analyze(const art::Event& evt)
 
   {
     static int NOvA = printf(
-      "ntuple: i:trktime:t:trkx:trky:trkz:dist:adc:e:nhit\n");
+      "ntuple: run:event:i:t:trkstartx:trkstarty:trkstartz:"
+      "trkx:trky:trkz:dist2:adc:e:nhit:timeleft\n");
     NOvA = NOvA;
   }
 
   art::ServiceHandle<calib::Calibrator> calthing;
+
+  if((*rawtrigger).empty()) return;
+
+  const double triggerlength = (*rawtrigger)[0].fTriggerRange_TriggerLength*kUSEC_PER_MICROSLICE;
 
   for(unsigned int t = 0; t < tracks->size(); t++){
 
@@ -224,22 +250,38 @@ void PostMuon::analyze(const art::Event& evt)
     int lasthiti_even = 0, lasthiti_odd = 0;
     last_hits(lasthiti_even, lasthiti_odd, trk);
 
+    // XXX needs to be refactored to not have a pile of variables
+    // XXX that have to be cleared periodically.
     int cluster_nhit = 0;
     int last_accepted_time = -1;
     int last_accepted_i = -1;
+    float dist2sum = 0; // summed hit distance from track end
     int asum = 0; // sumed ADC of a cluster of delayed hits
     float esum = 0; // summed calibrated energy, in MeV
     int cluster_i = 0;
 
-    for(int c = 0; c < (int)(*cellcol).size(); c++){
-      if(!hit_near_track(trk, lasthiti_even,
-         lasthiti_odd, cellcol, c)) continue;
+    // CellHits do *not* come in time order
+    std::vector<rb::CellHit> sorted_hits;
+    for(int c = 0; c < (int)cellcol->size(); c++)
+      sorted_hits.push_back((*cellcol)[c]);
+    std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit);
+
+    for(int c = 0; c < (int)cellcol->size(); c++){
+      const double dist = hit_near_track(trk, lasthiti_even,
+         lasthiti_odd, cellcol, c);
+
+      if(dist < 0) continue;
+
+      const double dist2 = dist*dist;
+
+      dist2sum += dist2;
 
       const rb::CellHit & chit = (*cellcol)[c];
 
+      const bool flip = trk.Stop().Y() > trk.Start().Y();
       const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
-         chit.Plane()%2 == 0? trk.Stop().X(): // doc-11570
-                              trk.Stop().Y());
+         chit.Plane()%2 == 0? (flip?trk.Start().X():trk.Stop().X()): // doc-11570
+                              (flip?trk.Start().Y():trk.Stop().Y()));
 
       // Hits are time ordered.  Only report on hits that are
       // separated in time from other accepted hits by at least
@@ -247,13 +289,17 @@ void PostMuon::analyze(const art::Event& evt)
       const bool newcluster = chit.TDC() > last_accepted_time + 1;
 
       if(newcluster && cluster_nhit){
-        print_ntuple_line(trk, (*cellcol)[c-1],
+        cluster_nhit++;
+        print_ntuple_line(evt, trk, triggerlength,
+                          dist2sum/cluster_nhit, chit.TDC(),
                           asum, esum, cluster_i++, cluster_nhit);
-        esum = cluster_nhit = 0;
+        asum = esum = cluster_nhit = dist2sum = 0;
+      }
+      else{
+        cluster_nhit++;
       }
      
 
-      cluster_nhit++;
       asum += chit.ADC();
       if(rhit.IsCalibrated()){
         esum += rhit.GeV()*1000;
@@ -270,7 +316,9 @@ void PostMuon::analyze(const art::Event& evt)
 
     // print last cluster
     if(cluster_nhit)
-      print_ntuple_line(trk, (*cellcol)[last_accepted_i],
+      print_ntuple_line(evt, trk, triggerlength,
+                        dist2sum/cluster_nhit,
+                        (*cellcol)[last_accepted_i].TDC(),
                         asum, esum, cluster_i++, cluster_nhit);
 
   }

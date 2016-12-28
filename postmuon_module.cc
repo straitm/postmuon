@@ -30,6 +30,7 @@ struct pm{
   int cluster_nhit;
   int last_accepted_time;
   int last_accepted_i;
+  float mindist;  // minimum hit distance from track end
   float dist2sum; // summed hit distance from track end
   int asum;       // sumed ADC of a cluster of delayed hits
   float esum;     // summed calibrated energy, in MeV
@@ -109,7 +110,8 @@ static int mean_late_track_time(const rb::Track & trk)
   const int max_for_avg = 40;
 
   float acc = 0;
-  for(unsigned int i = std::max(0, (int)tdcs.size() - max_for_avg); i < tdcs.size(); i++)
+  for(unsigned int i = std::max(0, (int)tdcs.size() - max_for_avg);
+      i < tdcs.size(); i++)
     acc += tdcs[i];
 
   return int(acc / std::min(max_for_avg, (int)tdcs.size()) + 0.5);
@@ -193,13 +195,14 @@ static void print_ntuple_line(const art::Event & evt,
 
   printf("ntuple: %d %d %d %f "
                  "%f %f %f "
-                 "%f %f %f "
+                 "%f %f %f %f "
                  "%f %d %f %d %f\n",
     evt.run(), evt.event(),
     answer.cluster_i,
     (hittime_tdc - tracktime)*kUSEC_PER_TDC,
     tsx, tsy, tsz,
     tx, ty, tz,
+    answer.mindist,
     answer.dist2sum/answer.cluster_nhit,
     answer.asum, answer.esum, answer.cluster_nhit, timeleft);
 }
@@ -226,11 +229,22 @@ static pm mkpm()
   res.cluster_nhit = 0;
   res.last_accepted_time = -1;
   res.last_accepted_i = -1;
+  res.mindist = 1000000;
   res.dist2sum = 0;
   res.asum = 0;
   res.esum = 0;
   res.cluster_i = 0;
   return res;
+}
+
+static void reset_pm(pm & answer)
+{
+  answer.cluster_nhit = 0;
+
+  answer.mindist = 1000000;
+  answer.dist2sum = 0;
+  answer.asum = 0;
+  answer.esum = 0;
 }
 
 void PostMuon::analyze(const art::Event& evt)
@@ -251,7 +265,7 @@ void PostMuon::analyze(const art::Event& evt)
   {
     static int NOvA = printf(
       "ntuple: run:event:i:t:trkstartx:trkstarty:trkstartz:"
-      "trkx:trky:trkz:dist2:adc:e:nhit:timeleft\n");
+      "trkx:trky:trkz:mindist:dist2:adc:e:nhit:timeleft\n");
     NOvA = NOvA;
   }
 
@@ -282,9 +296,8 @@ void PostMuon::analyze(const art::Event& evt)
 
       if(dist < 0) continue;
 
-      const double dist2 = dist*dist;
-
-      answer.dist2sum += dist2;
+      answer.dist2sum += dist*dist;
+      if(dist < answer.mindist) answer.mindist = dist;
 
       const rb::CellHit & chit = (*cellcol)[c];
 
@@ -302,7 +315,7 @@ void PostMuon::analyze(const art::Event& evt)
         print_ntuple_line(evt, trk, triggerlength,
                           chit.TDC(), answer);
         answer.cluster_i++;
-        answer.asum = answer.esum = answer.cluster_nhit = answer.dist2sum = 0;
+        reset_pm(answer);
       }
       else{
         answer.cluster_nhit++;

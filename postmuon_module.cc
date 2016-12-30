@@ -67,6 +67,23 @@ static double kUSEC_PER_MICROSLICE = 0.5; // XXX right?
 // which of those is right depends on what you're looking at.
 const double planes_per_cell = 76./39.;
 
+/*
+ Returns true if the track goes in the +z direction, assuming that it is
+ downward-going (i.e. that it goes in the -y direction).
+*/
+static bool is_increasing_z(const rb::Track & trk)
+{
+  const bool claims_increasing_z = trk.Stop().Z() > trk.Start().Z();
+  const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
+  return claims_increasing_z ^ needs_flip;
+}
+
+/*
+  Takes a track and a hit and determines the distance between the
+  end of the track and the hit.  lasthiti_{even,odd} are the indices
+  of the last hits in each view assuming that the track is going in the
+  -y direction (down).
+*/
 static float dist_trackend_to_cell(const rb::Track & trk,
                                    const rb::CellHit & chit,
                                    const int lasthiti_even,
@@ -77,14 +94,10 @@ static float dist_trackend_to_cell(const rb::Track & trk,
   const int lastcell_even =  trk.Cell(lasthiti_even)->Cell();
   const int lastcell_odd =   trk.Cell(lasthiti_odd) ->Cell();
 
-  const bool claimed_increasing_z = trk.Stop().Z() > trk.Start().Z();
-  const bool flip = trk.Stop().Y() > trk.Start().Y();
-
-  const bool increasing_z = claimed_increasing_z ^ flip;
+  const bool increasing_z = is_increasing_z(trk);
 
   const int lastplane = increasing_z?std::max(lastplane_even, lastplane_odd)
                                     :std::min(lastplane_even, lastplane_odd);
-
   return
     chit.Plane()%2 == 0 ?
       sqrt(pow(planes_per_cell*(chit.Plane() - lastplane)   , 2) +
@@ -148,28 +161,36 @@ static double hit_near_track(const rb::Track & trk,
   return dist;
 }
 
+/*
+  Passes back the last hit in each plane, assuming that the track is
+  downwards-going (i.e. in the -y direction).
+*/
 static void last_hits(int & lasthiti_even,
                       int & lasthiti_odd,
                       const rb::Track & trk)
 {
-  float lowest_even = 1e30, lowest_odd = 1e30;
+  float latest_even = 1e30, latest_odd = 1e30;
 
-  const bool claimed_increasing_z = trk.Stop().Z() > trk.Start().Z();
-  const bool flip = trk.Stop().Y() > trk.Start().Y();
-  const bool increasing_z = claimed_increasing_z ^ flip;
+  const bool increasing_z = is_increasing_z(trk);
+  const bool decreasing_z = !increasing_z;
 
   for(int c = 0; c < (int)trk.NCell(); c++){
     const rb::CellHit & chit = *(trk.Cell(c));
     const rb::RecoHit rhit = trk.RecoHit(c);
 
-    if(chit.Plane()%2 == 0 && (!increasing_z ^ (rhit.Z() > lowest_even))){
-      lasthiti_even = c;
-      lowest_even = rhit.Z();
+    if(chit.Plane()%2 == 0){
+      if((decreasing_z && rhit.Z() < latest_even) ||
+         (increasing_z && rhit.Z() > latest_even)){
+        lasthiti_even = c;
+        latest_even = rhit.Z();
+      }
     }
-
-    if(chit.Plane()%2 == 1 && (!increasing_z ^ (rhit.Z() > lowest_odd))){
-      lasthiti_odd = c;
-      lowest_odd = rhit.Z();
+    else{
+      if((decreasing_z && rhit.Z() < latest_odd) ||
+         (increasing_z && rhit.Z() > latest_odd)){
+        lasthiti_odd = c;
+        latest_odd = rhit.Z();
+      }
     }
   }
 }
@@ -183,15 +204,15 @@ static void print_ntuple_line(const art::Event & evt,
   const int tracktime = mean_late_track_time(trk);
   const double timeleft = eventlength - tracktime *kUSEC_PER_TDC;
 
-  const bool flip = trk.Stop().Y() > trk.Start().Y();
+  const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
 
-  const double tx = flip? trk.Start().X(): trk.Stop().X();
-  const double ty = flip? trk.Start().Y(): trk.Stop().Y();
-  const double tz = flip? trk.Start().Z(): trk.Stop().Z();
+  const double tx = needs_flip? trk.Start().X(): trk.Stop().X();
+  const double ty = needs_flip? trk.Start().Y(): trk.Stop().Y();
+  const double tz = needs_flip? trk.Start().Z(): trk.Stop().Z();
 
-  const double tsx = flip? trk.Stop().X(): trk.Start().X();
-  const double tsy = flip? trk.Stop().Y(): trk.Start().Y();
-  const double tsz = flip? trk.Stop().Z(): trk.Start().Z();
+  const double tsx = needs_flip? trk.Stop().X(): trk.Start().X();
+  const double tsy = needs_flip? trk.Stop().Y(): trk.Start().Y();
+  const double tsz = needs_flip? trk.Stop().Z(): trk.Start().Z();
 
   printf("ntuple: %d %d %d %f "
                  "%f %f %f "
@@ -301,10 +322,10 @@ void PostMuon::analyze(const art::Event& evt)
 
       const rb::CellHit & chit = (*cellcol)[c];
 
-      const bool flip = trk.Stop().Y() > trk.Start().Y();
+      const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
       const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
-         chit.Plane()%2 == 0? (flip?trk.Start().X():trk.Stop().X()): // doc-11570
-                              (flip?trk.Start().Y():trk.Stop().Y()));
+         chit.Plane()%2 == 0? (needs_flip?trk.Start().X():trk.Stop().X()): // doc-11570
+                              (needs_flip?trk.Start().Y():trk.Stop().Y()));
 
       // Hits are time ordered.  Only report on hits that are separated
       // in time from other accepted hits by at least 1 quiet TDC tick.

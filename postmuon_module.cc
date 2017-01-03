@@ -26,31 +26,62 @@
 
 #include "art/Framework/Core/EDAnalyzer.h"
 
+
 struct pm{
-  int cluster_nhit;
+  int nhit;
+  int first_accepted_time;
   int last_accepted_time;
-  int last_accepted_i;
   float mindist;  // minimum hit distance from track end
   float dist2sum; // summed hit distance from track end
-  int asum;       // sumed ADC of a cluster of delayed hits
+  int tsum;       // summed TDC of a cluster of delayed hits
+  int asum;       // summed ADC of a cluster of delayed hits
   float esum;     // summed calibrated energy, in MeV
+  int nuncal;     // number of uncalibrated hits
   int cluster_i;
 };
 
+static pm mkpm()
+{
+  pm res;
+  res.nhit = 0;
+  res.first_accepted_time = -1;
+  res.last_accepted_time = -10;
+  res.mindist = 1000000;
+  res.dist2sum = 0;
+  res.tsum = 0;
+  res.asum = 0;
+  res.esum = 0;
+  res.cluster_i = 0;
+  res.nuncal = 0;
+  return res;
+}
 
-/// Calibrating RawData to Produce CellHits
+static void reset_pm(pm & res)
+{
+  res.nhit = 0;
+  res.first_accepted_time = -1;
+  res.last_accepted_time = -10;
+  res.mindist = 1000000;
+  res.dist2sum = 0;
+  res.tsum = 0;
+  res.asum = 0;
+  res.esum = 0;
+  res.nuncal = 0;
+  // do not change cluster_i
+}
+
 namespace PostMuon {
 
   class PostMuon : public art::EDAnalyzer {
 
-  public:
+    public:
 
     explicit PostMuon(fhicl::ParameterSet const& pset);
     virtual ~PostMuon();
 
     void analyze(const art::Event& evt);
 
-  private:
+    private:
 
     int         fRemoveBadChans; ///< whether to remove bad channels
     std::string fRawDataLabel;   ///< label of where to find RawData
@@ -59,8 +90,8 @@ namespace PostMuon {
 }
 
 
-static double kUSEC_PER_TDC = 1./64.;
-static double kUSEC_PER_MICROSLICE = 0.5; // XXX right?
+static double USEC_PER_TDC = 1./64.;     // yes, really it is
+static double USEC_PER_MICROSLICE = 0.5; // XXX right?
 
 // Geometrically about correct, but perhaps should be scaled by density or
 // radiation length or neutron cross section or something.  Or not, since
@@ -136,11 +167,8 @@ static int mean_late_track_time(const rb::Track & trk)
 */
 static double hit_near_track(const rb::Track & trk,
   const int lasthiti_even, const int lasthiti_odd,
-  const art::Handle< std::vector<rb::CellHit> > & cellcol,
-  const int celli)
+  const rb::CellHit & chit)
 {
-  const rb::CellHit & chit = (*cellcol)[celli];
-
   const int tracktime = mean_late_track_time(trk);
 
   const int aftertdc = chit.TDC();
@@ -198,11 +226,10 @@ static void last_hits(int & lasthiti_even,
 static void print_ntuple_line(const art::Event & evt,
                               const rb::Track & trk,
                               const double eventlength,
-                              const int hittime_tdc,
                               const pm answer)
 {
   const int tracktime = mean_late_track_time(trk);
-  const double timeleft = eventlength - tracktime *kUSEC_PER_TDC;
+  const double timeleft = eventlength - tracktime *USEC_PER_TDC;
 
   const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
 
@@ -214,18 +241,20 @@ static void print_ntuple_line(const art::Event & evt,
   const double tsy = needs_flip? trk.Stop().Y(): trk.Start().Y();
   const double tsz = needs_flip? trk.Stop().Z(): trk.Start().Z();
 
-  printf("ntuple: %d %d %d %f "
-                 "%f %f %f "
-                 "%f %f %f %f "
-                 "%f %d %f %d %f\n",
-    evt.run(), evt.event(),
-    answer.cluster_i,
-    (hittime_tdc - tracktime)*kUSEC_PER_TDC,
-    tsx, tsy, tsz,
-    tx, ty, tz,
-    answer.mindist,
-    answer.dist2sum/answer.cluster_nhit,
-    answer.asum, answer.esum, answer.cluster_nhit, timeleft);
+  printf("ntuple: ");
+  printf("%d %d ", evt.run(), evt.event());
+  printf("%d ", answer.cluster_i);
+  printf("%f ", (float(answer.tsum)/answer.nhit-tracktime)*USEC_PER_TDC);
+  printf("%.3f %.3f %.3f ", tsx, tsy, tsz);
+  printf("%.3f %.3f %.3f %f ", tx, ty, tz, answer.mindist);
+  if(answer.dist2sum == 0) printf("0 ");
+  else printf("%f ", answer.dist2sum/answer.nhit);
+  printf("%d %f ", answer.asum, answer.esum);
+  printf("%f %d ", timeleft, answer.nhit);
+  printf("%d ", answer.nuncal);
+  printf("%d ", answer.last_accepted_time
+              - answer.first_accepted_time + 1);
+  printf("\n");
 }
 
 namespace PostMuon{
@@ -244,30 +273,6 @@ static bool compare_cellhit(const rb::CellHit & a, const rb::CellHit & b)
 
 PostMuon::~PostMuon() { }
 
-static pm mkpm()
-{
-  pm res;
-  res.cluster_nhit = 0;
-  res.last_accepted_time = -1;
-  res.last_accepted_i = -1;
-  res.mindist = 1000000;
-  res.dist2sum = 0;
-  res.asum = 0;
-  res.esum = 0;
-  res.cluster_i = 0;
-  return res;
-}
-
-static void reset_pm(pm & answer)
-{
-  answer.cluster_nhit = 0;
-
-  answer.mindist = 1000000;
-  answer.dist2sum = 0;
-  answer.asum = 0;
-  answer.esum = 0;
-}
-
 void PostMuon::analyze(const art::Event& evt)
 {
   // I'm so sorry that I have to do this.  And, my goodness, doing
@@ -285,8 +290,18 @@ void PostMuon::analyze(const art::Event& evt)
 
   {
     static int NOvA = printf(
-      "ntuple: run:event:i:t:trkstartx:trkstarty:trkstartz:"
-      "trkx:trky:trkz:mindist:dist2:adc:e:nhit:timeleft\n");
+      "ntuple: "
+      "run:event:"
+      "i:"
+      "t:"
+      "trkstartx:trkstarty:trkstartz:"
+      "trkx:trky:trkz:mindist:"
+      "dist2:"
+      "adc:e:"
+      "timeleft:nhit:"
+      "nuncal:"
+      "tdclen"
+      "\n");
     NOvA = NOvA;
   }
 
@@ -295,15 +310,16 @@ void PostMuon::analyze(const art::Event& evt)
   if(rawtrigger->empty()) return;
 
   const double triggerlength = (*rawtrigger)[0].
-    fTriggerRange_TriggerLength*kUSEC_PER_MICROSLICE;
+    fTriggerRange_TriggerLength*USEC_PER_MICROSLICE;
 
   for(unsigned int t = 0; t < tracks->size(); t++){
-
     const rb::Track & trk = (*tracks)[t];
+
+    // Badly tracked tracks are not useful
+    if(trk.Stop().X() == 0 || trk.Stop().Y() == 0) continue;
+
     int lasthiti_even = 0, lasthiti_odd = 0;
     last_hits(lasthiti_even, lasthiti_odd, trk);
-
-    pm answer = mkpm();
 
     // CellHits do *not* come in time order
     std::vector<rb::CellHit> sorted_hits;
@@ -311,51 +327,52 @@ void PostMuon::analyze(const art::Event& evt)
       sorted_hits.push_back((*cellcol)[c]);
     std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit);
 
-    for(int c = 0; c < (int)cellcol->size(); c++){
-      const double dist = hit_near_track(trk, lasthiti_even,
-         lasthiti_odd, cellcol, c);
+    pm answer = mkpm();
+    for(int c = 0; c < (int)sorted_hits.size(); c++){
+      const rb::CellHit & chit = sorted_hits[c];
+
+      const double dist =
+        hit_near_track(trk, lasthiti_even, lasthiti_odd, chit);
 
       if(dist < 0) continue;
-
-      answer.dist2sum += dist*dist;
-      if(dist < answer.mindist) answer.mindist = dist;
-
-      const rb::CellHit & chit = (*cellcol)[c];
-
-      const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
-      const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
-         chit.Plane()%2 == 0? (needs_flip?trk.Start().X():trk.Stop().X()): // doc-11570
-                              (needs_flip?trk.Start().Y():trk.Stop().Y()));
 
       // Hits are time ordered.  Only report on hits that are separated
       // in time from other accepted hits by at least 1 quiet TDC tick.
       const bool newcluster = chit.TDC() > answer.last_accepted_time + 1;
 
-      if(newcluster && answer.cluster_nhit){
-        answer.cluster_nhit++;
-        print_ntuple_line(evt, trk, triggerlength,
-                          chit.TDC(), answer);
+      if(newcluster && answer.nhit){
+        print_ntuple_line(evt, trk, triggerlength, answer);
         answer.cluster_i++;
         reset_pm(answer);
       }
-      else{
-        answer.cluster_nhit++;
-      }
 
-      answer.asum += chit.ADC();
-      // For now, just throw away uncalibrated hits,
-      // XXX is there a better approach?
-      if(rhit.IsCalibrated()) answer.esum += rhit.GeV()*1000;
+      // Add everthing to the cluster *after* the print of the
+      // previous cluster (or no-op).
+
+      answer.nhit++;
+
+      const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
+      const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
+         // doc-11570
+         chit.Plane()%2? (needs_flip?trk.Start().Y():trk.Stop().Y()):
+                         (needs_flip?trk.Start().X():trk.Stop().X()));
+
+      answer.dist2sum += dist*dist;
+      if(dist < answer.mindist) answer.mindist = dist;
 
       answer.last_accepted_time = chit.TDC();
-      answer.last_accepted_i = c;
+      if(answer.first_accepted_time < 0)
+        answer.first_accepted_time = chit.TDC();
+      answer.tsum += chit.TDC();
+      answer.asum += chit.ADC();
+
+      if(rhit.IsCalibrated()) answer.esum += rhit.GeV()*1000;
+      else answer.nuncal++;
     }
 
     // print last cluster
-    if(answer.cluster_nhit)
-      print_ntuple_line(evt, trk, triggerlength,
-                        (*cellcol)[answer.last_accepted_i].TDC(), answer);
-
+    if(answer.nhit)
+      print_ntuple_line(evt, trk, triggerlength, answer);
   }
 }
 

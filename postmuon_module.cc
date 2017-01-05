@@ -122,8 +122,8 @@ static bool is_increasing_z(const rb::Track & trk)
   of the last hits in each view assuming that the track is going in the
   -y direction (down).
 */
-static float dist_trackend_to_cell(const rb::Track & trk,
-                                   const rb::CellHit & chit,
+static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
+                                   const rb::CellHit & __restrict__ chit,
                                    const int lasthiti_even,
                                    const int lasthiti_odd)
 {
@@ -172,10 +172,10 @@ static double mean_late_track_time(const rb::Track & trk)
  If the hit is near the track and after it in time, return the distance
  in cells (where a plane is ~2 cells).  Otherwise, return -1.
 */
-static double hit_near_track(const rb::Track & trk,
+static double hit_near_track(const rb::Track & __restrict__ trk,
   const double tracktime,
   const int lasthiti_even, const int lasthiti_odd,
-  const rb::CellHit & chit)
+  const rb::CellHit & __restrict__ chit)
 {
   const int aftertdc = chit.TDC();
   if(aftertdc < tracktime) return -1;
@@ -200,9 +200,9 @@ static double hit_near_track(const rb::Track & trk,
   Passes back the last hit in each plane, assuming that the track is
   downwards-going (i.e. in the -y direction).
 */
-static void last_hits(int & lasthiti_even,
-                      int & lasthiti_odd,
-                      const rb::Track & trk)
+static void last_hits(int & __restrict__ lasthiti_even,
+                      int & __restrict__ lasthiti_odd,
+                      const rb::Track & __restrict__ trk)
 {
   float latest_even = 1e30, latest_odd = 1e30;
 
@@ -230,8 +230,8 @@ static void last_hits(int & lasthiti_even,
   }
 }
 
-static void print_ntuple_line(const art::Event & evt,
-                              const rb::Track & trk,
+static void print_ntuple_line(const art::Event & __restrict__ evt,
+                              const rb::Track & __restrict__ trk,
                               const double tracktime,
                               const double eventlength,
                               const pm answer)
@@ -273,7 +273,7 @@ PostMuon::PostMuon(fhicl::ParameterSet const& pset)
 
 }
 
-static bool compare_cellhit(const rb::CellHit & a, const rb::CellHit & b)
+static bool compare_cellhit(const rb::CellHit & __restrict__ a, const rb::CellHit & __restrict__ b)
 {
   return a.TDC() < b.TDC();
 }

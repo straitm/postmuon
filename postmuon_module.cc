@@ -29,6 +29,7 @@
 
 struct pm{
   int nhit;
+  int trk; // index of the track
   int first_accepted_time;
   int last_accepted_time;
   float mindist;  // minimum hit distance from track end
@@ -44,8 +45,9 @@ static pm mkpm()
 {
   pm res;
   res.nhit = 0;
-  res.first_accepted_time = -1;
-  res.last_accepted_time = -10;
+  res.trk = 0;
+  res.first_accepted_time = -1000000;
+  res.last_accepted_time  = -1000000;
   res.mindist = 1000000;
   res.dist2sum = 0;
   res.tsum = 0;
@@ -59,8 +61,9 @@ static pm mkpm()
 static void reset_pm(pm & res)
 {
   res.nhit = 0;
-  res.first_accepted_time = -1;
-  res.last_accepted_time = -10;
+  // do not change trk
+  res.first_accepted_time = -1000000;
+  res.last_accepted_time  = -1000000;
   res.mindist = 1000000;
   res.dist2sum = 0;
   res.tsum = 0;
@@ -92,6 +95,10 @@ namespace PostMuon {
 
 static double USEC_PER_TDC = 1./64.;     // yes, really it is
 static double USEC_PER_MICROSLICE = 0.5; // XXX right?
+
+// At least in runs 19107 and 19108, TDCs seem to only come in multiples
+// of 4.  Not true later, maybe, because of multipoint readout?
+const int TDC_GRANULARITY = 4;
 
 // Geometrically about correct, but perhaps should be scaled by density or
 // radiation length or neutron cross section or something.  Or not, since
@@ -143,7 +150,7 @@ static float dist_trackend_to_cell(const rb::Track & trk,
  This is meant to provide a robust measure of the track time, even if
  an early Michel decay gets reconstructed as part of the track.
 */
-static int mean_late_track_time(const rb::Track & trk)
+static double mean_late_track_time(const rb::Track & trk)
 {
   std::vector<int> tdcs;
   for(unsigned int i = 0; i < trk.NCell(); i++)
@@ -153,7 +160,7 @@ static int mean_late_track_time(const rb::Track & trk)
 
   const int max_for_avg = 40;
 
-  float acc = 0;
+  double acc = 0;
   for(unsigned int i = std::max(0, (int)tdcs.size() - max_for_avg);
       i < tdcs.size(); i++)
     acc += tdcs[i];
@@ -166,11 +173,10 @@ static int mean_late_track_time(const rb::Track & trk)
  in cells (where a plane is ~2 cells).  Otherwise, return -1.
 */
 static double hit_near_track(const rb::Track & trk,
+  const double tracktime,
   const int lasthiti_even, const int lasthiti_odd,
   const rb::CellHit & chit)
 {
-  const int tracktime = mean_late_track_time(trk);
-
   const int aftertdc = chit.TDC();
   if(aftertdc < tracktime) return -1;
 
@@ -179,7 +185,8 @@ static double hit_near_track(const rb::Track & trk,
   //if(hit_is_in_track(chit, trk)) return -1;
 
   // Enough to catch ~99% of gammas from neutron capture according to my toy MC
-  const double maxdist_in_cells = 20.1;
+  //const double maxdist_in_cells = 20.1;
+  const double maxdist_in_cells = 4; // something much smaller for FD
 
   const double dist = dist_trackend_to_cell(trk, chit, lasthiti_even,
                                             lasthiti_odd);
@@ -225,24 +232,25 @@ static void last_hits(int & lasthiti_even,
 
 static void print_ntuple_line(const art::Event & evt,
                               const rb::Track & trk,
+                              const double tracktime,
                               const double eventlength,
                               const pm answer)
 {
-  const int tracktime = mean_late_track_time(trk);
-  const double timeleft = eventlength - tracktime *USEC_PER_TDC;
+  const double timeleft = eventlength - tracktime*USEC_PER_TDC;
 
   const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
-
-  const double tx = needs_flip? trk.Start().X(): trk.Stop().X();
-  const double ty = needs_flip? trk.Start().Y(): trk.Stop().Y();
-  const double tz = needs_flip? trk.Start().Z(): trk.Stop().Z();
 
   const double tsx = needs_flip? trk.Stop().X(): trk.Start().X();
   const double tsy = needs_flip? trk.Stop().Y(): trk.Start().Y();
   const double tsz = needs_flip? trk.Stop().Z(): trk.Start().Z();
 
+  const double tx = needs_flip? trk.Start().X(): trk.Stop().X();
+  const double ty = needs_flip? trk.Start().Y(): trk.Stop().Y();
+  const double tz = needs_flip? trk.Start().Z(): trk.Stop().Z();
+
   printf("ntuple: ");
   printf("%d %d ", evt.run(), evt.event());
+  printf("%d ", answer.trk);
   printf("%d ", answer.cluster_i);
   printf("%f ", (float(answer.tsum)/answer.nhit-tracktime)*USEC_PER_TDC);
   printf("%.3f %.3f %.3f ", tsx, tsy, tsz);
@@ -252,8 +260,7 @@ static void print_ntuple_line(const art::Event & evt,
   printf("%d %f ", answer.asum, answer.esum);
   printf("%f %d ", timeleft, answer.nhit);
   printf("%d ", answer.nuncal);
-  printf("%d ", answer.last_accepted_time
-              - answer.first_accepted_time + 1);
+  printf("%d ", answer.last_accepted_time - answer.first_accepted_time);
   printf("\n");
 }
 
@@ -291,7 +298,7 @@ void PostMuon::analyze(const art::Event& evt)
   {
     static int NOvA = printf(
       "ntuple: "
-      "run:event:"
+      "run:event:trk:"
       "i:"
       "t:"
       "trkstartx:trkstarty:trkstartz:"
@@ -320,6 +327,7 @@ void PostMuon::analyze(const art::Event& evt)
 
     int lasthiti_even = 0, lasthiti_odd = 0;
     last_hits(lasthiti_even, lasthiti_odd, trk);
+    const double tracktime = mean_late_track_time(trk);
 
     // CellHits do *not* come in time order
     std::vector<rb::CellHit> sorted_hits;
@@ -328,20 +336,22 @@ void PostMuon::analyze(const art::Event& evt)
     std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit);
 
     pm answer = mkpm();
+    answer.trk = t;
     for(int c = 0; c < (int)sorted_hits.size(); c++){
       const rb::CellHit & chit = sorted_hits[c];
 
       const double dist =
-        hit_near_track(trk, lasthiti_even, lasthiti_odd, chit);
+        hit_near_track(trk, tracktime, lasthiti_even, lasthiti_odd, chit);
 
       if(dist < 0) continue;
 
       // Hits are time ordered.  Only report on hits that are separated
       // in time from other accepted hits by at least 1 quiet TDC tick.
-      const bool newcluster = chit.TDC() > answer.last_accepted_time + 1;
+      const bool newcluster = chit.TDC() > answer.last_accepted_time
+                                           + 1*TDC_GRANULARITY;
 
       if(newcluster && answer.nhit){
-        print_ntuple_line(evt, trk, triggerlength, answer);
+        print_ntuple_line(evt, trk, tracktime, triggerlength, answer);
         answer.cluster_i++;
         reset_pm(answer);
       }
@@ -372,7 +382,7 @@ void PostMuon::analyze(const art::Event& evt)
 
     // print last cluster
     if(answer.nhit)
-      print_ntuple_line(evt, trk, triggerlength, answer);
+      print_ntuple_line(evt, trk, tracktime, triggerlength, answer);
   }
 }
 

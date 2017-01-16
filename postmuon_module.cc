@@ -337,6 +337,7 @@ void PostMuon::analyze(const art::Event& evt)
 
     pm answer = mkpm();
     answer.trk = t;
+    const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
     for(int c = 0; c < (int)sorted_hits.size(); c++){
       const rb::CellHit & chit = sorted_hits[c];
 
@@ -361,9 +362,9 @@ void PostMuon::analyze(const art::Event& evt)
 
       answer.nhit++;
 
-      const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
       const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
-         // doc-11570
+         // doc-11570: even = horizontal = gives y information
+         // So if the hit is odd, it needs an even (y) plane to provide W
          chit.Plane()%2? (needs_flip?trk.Start().Y():trk.Stop().Y()):
                          (needs_flip?trk.Start().X():trk.Stop().X()));
 

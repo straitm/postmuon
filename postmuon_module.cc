@@ -30,13 +30,14 @@
 struct pm{
   int nhit;
   int trk; // index of the track
-  int first_accepted_time;
-  int last_accepted_time;
+  int first_accepted_time; // time of the first hit in the cluster
+  int last_accepted_time; // time of the last hit in the cluster
   float mindist;  // minimum hit distance from track end
   float dist2sum; // summed hit distance from track end
   int tsum;       // summed TDC of a cluster of delayed hits
   int asum;       // summed ADC of a cluster of delayed hits
   float esum;     // summed calibrated energy, in MeV
+  float esum_ex;  // Same, but without hits where the track was
   int nuncal;     // number of uncalibrated hits
   int cluster_i;
 };
@@ -53,6 +54,7 @@ static pm mkpm()
   res.tsum = 0;
   res.asum = 0;
   res.esum = 0;
+  res.esum_ex = 0;
   res.cluster_i = 0;
   res.nuncal = 0;
   return res;
@@ -69,6 +71,7 @@ static void reset_pm(pm & res)
   res.tsum = 0;
   res.asum = 0;
   res.esum = 0;
+  res.esum_ex = 0;
   res.nuncal = 0;
   // do not change cluster_i
 }
@@ -104,6 +107,25 @@ const int TDC_GRANULARITY = 4;
 // radiation length or neutron cross section or something.  Or not, since
 // which of those is right depends on what you're looking at.
 const double planes_per_cell = 76./39.;
+
+/*
+ Returns true if the given hit is in the same cell as any hit
+ in the given track.  This is meant to exclude cells that are 
+ inefficient for detecting Michel hits, so there is no time 
+ requirement. 
+*/
+static bool hit_on_track(const rb::CellHit & chit,
+                         const rb::Track & trk)
+{
+  for(unsigned int i = 0; i < trk.NCell(); i++){
+    const rb::CellHit & trk_chit = *(trk.Cell(i));
+
+    if(trk_chit.Plane() == chit.Plane() &&
+       trk_chit. Cell() == chit. Cell()) return true;
+  }
+  return false;
+}
+
 
 /*
  Returns true if the track goes in the +z direction, assuming that it is
@@ -257,7 +279,7 @@ static void print_ntuple_line(const art::Event & __restrict__ evt,
   printf("%.3f %.3f %.3f %f ", tx, ty, tz, answer.mindist);
   if(answer.dist2sum == 0) printf("0 ");
   else printf("%f ", answer.dist2sum/answer.nhit);
-  printf("%d %f ", answer.asum, answer.esum);
+  printf("%d %f %f ", answer.asum, answer.esum, answer.esum_ex);
   printf("%f %d ", timeleft, answer.nhit);
   printf("%d ", answer.nuncal);
   printf("%d ", answer.last_accepted_time - answer.first_accepted_time);
@@ -304,7 +326,7 @@ void PostMuon::analyze(const art::Event& evt)
       "trkstartx:trkstarty:trkstartz:"
       "trkx:trky:trkz:mindist:"
       "dist2:"
-      "adc:e:"
+      "adc:e:eex:"
       "timeleft:nhit:"
       "nuncal:"
       "tdclen"
@@ -377,7 +399,10 @@ void PostMuon::analyze(const art::Event& evt)
       answer.tsum += chit.TDC();
       answer.asum += chit.ADC();
 
-      if(rhit.IsCalibrated()) answer.esum += rhit.GeV()*1000;
+      if(rhit.IsCalibrated()){
+        answer.esum += rhit.GeV()*1000;
+        if(!hit_on_track(chit, trk)) answer.esum_ex += rhit.GeV()*1000;
+      }
       else answer.nuncal++;
     }
 

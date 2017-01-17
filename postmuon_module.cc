@@ -19,6 +19,8 @@
 #include "Simulation/ParticleNavigator.h"
 #include "RawData/RawTrigger.h"
 
+#include "GeometryObjects/PlaneGeo.h"
+
 #include <string>
 #include <algorithm>
 
@@ -423,10 +425,9 @@ void PostMuon::analyze(const art::Event& evt)
       answer.nhit++;
 
       const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
-         // doc-11570: even = horizontal = gives y information
-         // So if the hit is odd, it needs an even (y) plane to provide W
-         chit.Plane()%2? (needs_flip?trk.Start().Y():trk.Stop().Y()):
-                         (needs_flip?trk.Start().X():trk.Stop().X()));
+         // If the hit is in X, it needs a Y plane to provide W
+         chit.View() == geo::kX? (needs_flip?trk.Start().Y():trk.Stop().Y()):
+                                 (needs_flip?trk.Start().X():trk.Stop().X()));
 
       answer.dist2sum += dist*dist;
       if(dist < answer.mindist) answer.mindist = dist;

@@ -191,8 +191,9 @@ static double mean_late_track_time(const rb::Track & trk)
 }
 
 /*
- If the hit is near the track and after it in time, return the distance
- in cells (where a plane is ~2 cells).  Otherwise, return -1.
+  If the hit is near the track and after it in time, return the distance
+  in cells.  Otherwise, return -1 if the hit preceeds the track, or -2
+  if it is too far away.
 */
 static double hit_near_track(const rb::Track & __restrict__ trk,
   const double tracktime,
@@ -213,7 +214,7 @@ static double hit_near_track(const rb::Track & __restrict__ trk,
   const double dist = dist_trackend_to_cell(trk, chit, lasthiti_even,
                                             lasthiti_odd);
 
-  if(dist > maxdist_in_cells) return -1;
+  if(dist > maxdist_in_cells) return -2;
 
   return dist;
 }
@@ -358,8 +359,17 @@ void PostMuon::analyze(const art::Event& evt)
     std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit);
   }
 
-  for(unsigned int t = 0; t < tracks->size(); t++){
-    const rb::Track & trk = (*tracks)[t];
+  std::vector<rb::Track> sorted_tracks;
+  if(!tracks->empty()){
+    for(int c = 0; c < (int)tracks->size(); c++)
+      sorted_tracks.push_back((*tracks)[c]);
+    std::sort(sorted_tracks.begin(), sorted_tracks.end(), compare_track);
+  }
+
+  int first_hit_to_consider = 0;
+
+  for(unsigned int t = 0; t < sorted_tracks.size(); t++){
+    const rb::Track & trk = sorted_tracks[t];
 
     // Badly tracked tracks are not useful
     if(trk.Stop().X() == 0 || trk.Stop().Y() == 0) continue;
@@ -371,13 +381,20 @@ void PostMuon::analyze(const art::Event& evt)
     pm answer = mkpm();
     answer.trk = t;
     const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
-    for(int c = 0; c < (int)sorted_hits.size(); c++){
+    for(int c = first_hit_to_consider; c < (int)sorted_hits.size(); c++){
       const rb::CellHit & chit = sorted_hits[c];
 
       const double dist =
         hit_near_track(trk, tracktime, lasthiti_even, lasthiti_odd, chit);
 
-      if(dist < 0) continue;
+      if(dist < 0){
+        // This hit is before this track, so it will also be before
+        // all further tracks (since we sorted the tracks above). ~5%
+        // speed bump from this optimization.
+        if(dist == -1) first_hit_to_consider = c+1;
+
+        continue;
+      }
 
       // Hits are time ordered.  Only report on hits that are separated
       // in time from other accepted hits by at least 1 quiet TDC tick.

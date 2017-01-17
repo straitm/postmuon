@@ -295,7 +295,16 @@ PostMuon::PostMuon(fhicl::ParameterSet const& pset)
 
 }
 
-static bool compare_cellhit(const rb::CellHit & __restrict__ a, const rb::CellHit & __restrict__ b)
+// Compare tracks by their time
+static bool compare_track(const rb::Track & __restrict__ a,
+                          const rb::Track & __restrict__ b)
+{
+  return mean_late_track_time(a) < mean_late_track_time(b);
+}
+
+// Compare cellhits by their time
+static bool compare_cellhit(const rb::CellHit & __restrict__ a,
+                            const rb::CellHit & __restrict__ b)
 {
   return a.TDC() < b.TDC();
 }
@@ -341,6 +350,14 @@ void PostMuon::analyze(const art::Event& evt)
   const double triggerlength = (*rawtrigger)[0].
     fTriggerRange_TriggerLength*USEC_PER_MICROSLICE;
 
+  // CellHits do *not* come in time order
+  std::vector<rb::CellHit> sorted_hits;
+  if(!tracks->empty()){
+    for(int c = 0; c < (int)cellcol->size(); c++)
+      sorted_hits.push_back((*cellcol)[c]);
+    std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit);
+  }
+
   for(unsigned int t = 0; t < tracks->size(); t++){
     const rb::Track & trk = (*tracks)[t];
 
@@ -350,12 +367,6 @@ void PostMuon::analyze(const art::Event& evt)
     int lasthiti_even = 0, lasthiti_odd = 0;
     last_hits(lasthiti_even, lasthiti_odd, trk);
     const double tracktime = mean_late_track_time(trk);
-
-    // CellHits do *not* come in time order
-    std::vector<rb::CellHit> sorted_hits;
-    for(int c = 0; c < (int)cellcol->size(); c++)
-      sorted_hits.push_back((*cellcol)[c]);
-    std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit);
 
     pm answer = mkpm();
     answer.trk = t;

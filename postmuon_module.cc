@@ -286,11 +286,11 @@ static void print_ntuple_line(const art::Event & __restrict__ evt,
   printf("%d ", answer.trk);
   printf("%d ", answer.cluster_i);
   printf("%f ", (float(answer.tsum)/answer.nhit-tracktime)*USEC_PER_TDC);
-  printf("%.3f %.3f %.3f ", tsx, tsy, tsz);
-  printf("%.3f %.3f %.3f %f ", tx, ty, tz, answer.mindist);
+  printf("%.1f %.1f %.1f ", tsx, tsy, tsz);
+  printf("%.1f %.1f %.1f %.3f ", tx, ty, tz, answer.mindist);
   if(answer.dist2sum == 0) printf("0 ");
-  else printf("%f ", answer.dist2sum/answer.nhit);
-  printf("%d %f %f ", answer.asum, answer.esum, answer.esum_ex);
+  else printf("%.3f ", answer.dist2sum/answer.nhit);
+  printf("%d %.3f %.3f ", answer.asum, answer.esum, answer.esum_ex);
   printf("%f %d ", timeleft, answer.nhit);
   printf("%d ", answer.nuncal);
   printf("%d ", answer.last_accepted_time - answer.first_accepted_time);

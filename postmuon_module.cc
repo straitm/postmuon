@@ -37,7 +37,8 @@ struct pm{
   int tsum;       // summed TDC of a cluster of delayed hits
   int asum;       // summed ADC of a cluster of delayed hits
   float esum;     // summed calibrated energy, in MeV
-  float esum_ex;  // Same, but without hits where the track was
+  float esum_ex;  // Same, but without hits in any module where the track was,
+                  // in order to attempt to get an unbiased, sag-free measurement
   int nuncal;     // number of uncalibrated hits
   int cluster_i;
 };
@@ -108,20 +109,29 @@ const int TDC_GRANULARITY = 4;
 // which of those is right depends on what you're looking at.
 const double planes_per_cell = 76./39.;
 
+// Returns true if two cells (given that they are in the
+// same plane) are in the same module.
+static bool same_module(const int cell1, const int cell2)
+{
+  // Cells are numbered 0-31, 32-63, etc, doc-11570.
+  // True in both Near and Far.  So this is really easy.
+  return cell1/32 == cell2/32;
+}
+
 /*
- Returns true if the given hit is in the same cell as any hit
- in the given track.  This is meant to exclude cells that are 
- inefficient for detecting Michel hits, so there is no time 
- requirement. 
+  Returns true if the given hit is in the same module as any hit in the
+  given track.  This is meant to exclude cells that are inefficient for
+  detecting Michel hits because of APD sag (see doc-12802, etc.) and/or
+  the lack of second rising edge, so there is no time requirement.
 */
-static bool hit_on_track(const rb::CellHit & chit,
-                         const rb::Track & trk)
+static bool hit_in_track_module(const rb::CellHit & chit,
+                                const rb::Track & trk)
 {
   for(unsigned int i = 0; i < trk.NCell(); i++){
     const rb::CellHit & trk_chit = *(trk.Cell(i));
 
     if(trk_chit.Plane() == chit.Plane() &&
-       trk_chit. Cell() == chit. Cell()) return true;
+       same_module(trk_chit. Cell(), chit. Cell())) return true;
   }
   return false;
 }
@@ -429,7 +439,7 @@ void PostMuon::analyze(const art::Event& evt)
 
       if(rhit.IsCalibrated()){
         answer.esum += rhit.GeV()*1000;
-        if(!hit_on_track(chit, trk)) answer.esum_ex += rhit.GeV()*1000;
+        if(!hit_in_track_module(chit, trk)) answer.esum_ex += rhit.GeV()*1000;
       }
       else answer.nuncal++;
     }

@@ -28,6 +28,7 @@
 
 #include "art/Framework/Core/EDAnalyzer.h"
 
+static FILE * OUT = NULL;
 
 struct pm{
   int nhit;
@@ -41,6 +42,8 @@ struct pm{
   float esum;     // summed calibrated energy, in MeV
   float esum_ex;  // Same, but without hits in any module where the track was,
                   // in order to attempt to get an unbiased, sag-free measurement
+  float esum_xt;  // Same, but without hits that are part of any tracks,
+                  // in an attempt to beat down uncorrelated background.
   int nuncal;     // number of uncalibrated hits
   int cluster_i;
 };
@@ -58,6 +61,7 @@ static pm mkpm()
   res.asum = 0;
   res.esum = 0;
   res.esum_ex = 0;
+  res.esum_xt = 0;
   res.cluster_i = 0;
   res.nuncal = 0;
   return res;
@@ -75,6 +79,7 @@ static void reset_pm(pm & res)
   res.asum = 0;
   res.esum = 0;
   res.esum_ex = 0;
+  res.esum_xt = 0;
   res.nuncal = 0;
   // do not change cluster_i
 }
@@ -89,6 +94,8 @@ namespace PostMuon {
     virtual ~PostMuon();
 
     void analyze(const art::Event& evt);
+
+    void endJob();
 
     private:
 
@@ -138,6 +145,22 @@ static bool hit_in_track_module(const rb::CellHit & chit,
   return false;
 }
 
+
+/* Returns true if this cell hit is in any track in the event (or, really
+ * if it is contained in the list of hits passed in).
+ *
+ * This is a dumb implementation.  Could sort the list of track hits and use a
+ * stdlib function to see if it is in the list.  However, this uses only a tiny
+ * fraction of the time, so don't bother. Tested for both regular and DDsnews
+ * triggers.
+ */
+static bool hit_in_any_track(const rb::CellHit & chit,
+                             const std::vector<rb::CellHit> & trkhits)
+{
+  for(unsigned int i = 0; i < trkhits.size(); i++)
+    if(trkhits[i] == chit) return true;
+  return false;
+}
 
 /*
  Returns true if the track goes in the +z direction, assuming that it is
@@ -283,20 +306,20 @@ static void print_ntuple_line(const art::Event & __restrict__ evt,
   const double ty = needs_flip? trk.Start().Y(): trk.Stop().Y();
   const double tz = needs_flip? trk.Start().Z(): trk.Stop().Z();
 
-  printf("ntuple: ");
-  printf("%d %d ", evt.run(), evt.event());
-  printf("%d ", answer.trk);
-  printf("%d ", answer.cluster_i);
-  printf("%f ", (float(answer.tsum)/answer.nhit-tracktime)*USEC_PER_TDC);
-  printf("%.1f %.1f %.1f ", tsx, tsy, tsz);
-  printf("%.1f %.1f %.1f %.3f ", tx, ty, tz, answer.mindist);
-  if(answer.dist2sum == 0) printf("0 ");
-  else printf("%.3f ", answer.dist2sum/answer.nhit);
-  printf("%d %.3f %.3f ", answer.asum, answer.esum, answer.esum_ex);
-  printf("%f %d ", timeleft, answer.nhit);
-  printf("%d ", answer.nuncal);
-  printf("%d ", answer.last_accepted_time - answer.first_accepted_time);
-  printf("\n");
+  fprintf(OUT, "%d %d ", evt.run(), evt.event());
+  fprintf(OUT, "%d ", answer.trk);
+  fprintf(OUT, "%d ", answer.cluster_i);
+  fprintf(OUT, "%f ", (float(answer.tsum)/answer.nhit-tracktime)*USEC_PER_TDC);
+  fprintf(OUT, "%.1f %.1f %.1f ", tsx, tsy, tsz);
+  fprintf(OUT, "%.1f %.1f %.1f %.3f ", tx, ty, tz, answer.mindist);
+  if(answer.dist2sum == 0) fprintf(OUT, "0 ");
+  else fprintf(OUT, "%.3f ", answer.dist2sum/answer.nhit);
+  fprintf(OUT, "%d %.3f %.3f %.3f ",
+    answer.asum, answer.esum, answer.esum_ex, answer.esum_xt);
+  fprintf(OUT, "%f %d ", timeleft, answer.nhit);
+  fprintf(OUT, "%d ", answer.nuncal);
+  fprintf(OUT, "%d ", answer.last_accepted_time - answer.first_accepted_time);
+  fprintf(OUT, "\n");
 }
 
 namespace PostMuon{
@@ -308,6 +331,11 @@ PostMuon::PostMuon(fhicl::ParameterSet const& pset)
 
 }
 
+void PostMuon::endJob()
+{
+  fclose(OUT);
+}
+
 // Compare tracks by their time
 static bool compare_track(const rb::Track & __restrict__ a,
                           const rb::Track & __restrict__ b)
@@ -315,11 +343,22 @@ static bool compare_track(const rb::Track & __restrict__ a,
   return mean_late_track_time(a) < mean_late_track_time(b);
 }
 
-// Compare cellhits by their time
+// Compare cellhits by their time.  Note that CellHit has the operator<
+// defined, but that compares by plane, then by cell, then by time, which
+// is not what we need here.
 static bool compare_cellhit(const rb::CellHit & __restrict__ a,
                             const rb::CellHit & __restrict__ b)
 {
   return a.TDC() < b.TDC();
+}
+
+static std::vector<rb::CellHit> make_trkhits(const std::vector<rb::Track> & trks)
+{
+  std::vector<rb::CellHit> answer;
+  for(unsigned int i = 0; i < trks.size(); i++)
+    for(unsigned int j = 0; j < trks[i].NCell(); j++)
+      answer.push_back(*(trks[i].Cell(j)));
+  return answer;
 }
 
 PostMuon::~PostMuon() { }
@@ -340,15 +379,21 @@ void PostMuon::analyze(const art::Event& evt)
   evt.getByLabel("kalmantrackmerge", tracks);
 
   {
-    static int NOvA = printf(
-      "ntuple: "
+    if(OUT == NULL){
+      OUT = fopen(Form("postmuon_%d_%d.ntuple", evt.run(), evt.subRun()), "w");
+      if(OUT == NULL){
+         fprintf(stderr, "Could not open output ntuple file\n");
+         exit(1);
+      }
+    }
+    static int NOvA = fprintf(OUT,
       "run:event:trk:"
       "i:"
       "t:"
       "trkstartx:trkstarty:trkstartz:"
       "trkx:trky:trkz:mindist:"
       "dist2:"
-      "adc:e:eex:"
+      "adc:e:eex:ext:"
       "timeleft:nhit:"
       "nuncal:"
       "tdclen"
@@ -377,6 +422,8 @@ void PostMuon::analyze(const art::Event& evt)
       sorted_tracks.push_back((*tracks)[c]);
     std::sort(sorted_tracks.begin(), sorted_tracks.end(), compare_track);
   }
+
+  std::vector<rb::CellHit> trkhits = make_trkhits(sorted_tracks);
 
   int first_hit_to_consider = 0;
 
@@ -441,6 +488,7 @@ void PostMuon::analyze(const art::Event& evt)
       if(rhit.IsCalibrated()){
         answer.esum += rhit.GeV()*1000;
         if(!hit_in_track_module(chit, trk)) answer.esum_ex += rhit.GeV()*1000;
+        if(!hit_in_any_track(chit, trkhits)) answer.esum_xt += rhit.GeV()*1000;
       }
       else answer.nuncal++;
     }

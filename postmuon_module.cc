@@ -42,8 +42,15 @@ struct pm{
   float esum;     // summed calibrated energy, in MeV
   float esum_ex;  // Same, but without hits in any module where the track was,
                   // in order to attempt to get an unbiased, sag-free measurement
+  float esum_ex2; // Same, but also excluding any module that had a hit coincident
+                  // with the track, where anything within 0.4us counts as
+                  // coincident.  This is 2-3 sigma in the time resolution and
+                  // should catch almost all hits that are prompt, either muon
+                  // hits that didn't get reconstructed as part of the track,
+                  // or brems, or x-rays from muon atomic capture, or whatever else.
   float esum_xt;  // Same, but without hits that are part of any tracks,
-                  // in an attempt to beat down uncorrelated background.
+                  // in an attempt to beat down uncorrelated background (doesn't seem
+                  // to have much effect -- maybe 5-10%.)
   int nuncal;     // number of uncalibrated hits
   int cluster_i;
 };
@@ -61,6 +68,7 @@ static pm mkpm()
   res.asum = 0;
   res.esum = 0;
   res.esum_ex = 0;
+  res.esum_ex2 = 0;
   res.esum_xt = 0;
   res.cluster_i = 0;
   res.nuncal = 0;
@@ -79,6 +87,7 @@ static void reset_pm(pm & res)
   res.asum = 0;
   res.esum = 0;
   res.esum_ex = 0;
+  res.esum_ex2 = 0;
   res.esum_xt = 0;
   res.nuncal = 0;
   // do not change cluster_i
@@ -118,6 +127,31 @@ const int TDC_GRANULARITY = 4;
 // which of those is right depends on what you're looking at.
 const double planes_per_cell = 76./39.;
 
+/*
+ Return the average hit time of the latest 40 hits (or all of them),
+ in TDC counts.
+
+ This is meant to provide a robust measure of the track time, even if
+ an early Michel decay gets reconstructed as part of the track.
+*/
+static double mean_late_track_time(const rb::Track & trk)
+{
+  std::vector<int> tdcs;
+  for(unsigned int i = 0; i < trk.NCell(); i++)
+    tdcs.push_back(trk.Cell(i)->TDC());
+
+  std::sort(tdcs.begin(), tdcs.end());
+
+  const int max_for_avg = 40;
+
+  double acc = 0;
+  for(unsigned int i = std::max(0, (int)tdcs.size() - max_for_avg);
+      i < tdcs.size(); i++)
+    acc += tdcs[i];
+
+  return int(acc / std::min(max_for_avg, (int)tdcs.size()) + 0.5);
+}
+
 // Returns true if two cells (given that they are in the
 // same plane) are in the same module.
 static bool same_module(const int cell1, const int cell2)
@@ -125,6 +159,32 @@ static bool same_module(const int cell1, const int cell2)
   // Cells are numbered 0-31, 32-63, etc, doc-11570.
   // True in both Near and Far.  So this is really easy.
   return cell1/32 == cell2/32;
+}
+
+/*
+  Returns true if the given hit is in the same module as any hit coincident
+  (within the time given below) with the given track.  Along with excluding the
+  track itself, this is meant to do better at excluding cells that are
+  inefficient.
+*/
+static bool hit_in_track_coincident_module(const rb::CellHit & chit,
+                                           const rb::Track & trk,
+                                           const std::vector<rb::CellHit> & sorted_hits)
+{
+  const double timecut = 0.4/USEC_PER_TDC;
+
+  const double tracktime = mean_late_track_time(trk);
+
+  for(unsigned int i = 0; i < sorted_hits.size(); i++){
+    const rb::CellHit & coin_chit = sorted_hits[i];
+
+    if(tracktime - coin_chit.TDC() > +timecut) continue;
+    if(tracktime - coin_chit.TDC() < -timecut) break;
+
+    if(coin_chit.Plane() == chit.Plane() &&
+       same_module(coin_chit.Cell(), chit.Cell())) return true;
+  }
+  return false;
 }
 
 /*
@@ -199,30 +259,6 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
            pow(                 chit.Cell()  - lastcell_even, 2))
    :  sqrt(pow(planes_per_cell*(chit.Plane() - lastplane)   , 2) +
            pow(                 chit.Cell()  - lastcell_odd , 2));
-}
-
-/*
- Return the average hit time of the latest 40 hits (or all of them).
-
- This is meant to provide a robust measure of the track time, even if
- an early Michel decay gets reconstructed as part of the track.
-*/
-static double mean_late_track_time(const rb::Track & trk)
-{
-  std::vector<int> tdcs;
-  for(unsigned int i = 0; i < trk.NCell(); i++)
-    tdcs.push_back(trk.Cell(i)->TDC());
-
-  std::sort(tdcs.begin(), tdcs.end());
-
-  const int max_for_avg = 40;
-
-  double acc = 0;
-  for(unsigned int i = std::max(0, (int)tdcs.size() - max_for_avg);
-      i < tdcs.size(); i++)
-    acc += tdcs[i];
-
-  return int(acc / std::min(max_for_avg, (int)tdcs.size()) + 0.5);
 }
 
 /*
@@ -314,8 +350,8 @@ static void print_ntuple_line(const art::Event & __restrict__ evt,
   fprintf(OUT, "%.1f %.1f %.1f %.3f ", tx, ty, tz, answer.mindist);
   if(answer.dist2sum == 0) fprintf(OUT, "0 ");
   else fprintf(OUT, "%.3f ", answer.dist2sum/answer.nhit);
-  fprintf(OUT, "%d %.3f %.3f %.3f ",
-    answer.asum, answer.esum, answer.esum_ex, answer.esum_xt);
+  fprintf(OUT, "%d %.3f %.3f %.3f %.3f ",
+    answer.asum, answer.esum, answer.esum_ex, answer.esum_ex2, answer.esum_xt);
   fprintf(OUT, "%f %d ", timeleft, answer.nhit);
   fprintf(OUT, "%d ", answer.nuncal);
   fprintf(OUT, "%d ", answer.last_accepted_time - answer.first_accepted_time);
@@ -380,7 +416,7 @@ void PostMuon::analyze(const art::Event& evt)
 
   {
     if(OUT == NULL){
-      OUT = fopen(Form("postmuon_%d_%d.ntuple", evt.run(), evt.subRun()), "w");
+      OUT = fopen(Form("postmuon_%d_%d.20170120.ntuple", evt.run(), evt.subRun()), "w");
       if(OUT == NULL){
          fprintf(stderr, "Could not open output ntuple file\n");
          exit(1);
@@ -393,7 +429,7 @@ void PostMuon::analyze(const art::Event& evt)
       "trkstartx:trkstarty:trkstartz:"
       "trkx:trky:trkz:mindist:"
       "dist2:"
-      "adc:e:eex:ext:"
+      "adc:e:eex:eex2:ext:"
       "timeleft:nhit:"
       "nuncal:"
       "tdclen"
@@ -487,7 +523,11 @@ void PostMuon::analyze(const art::Event& evt)
 
       if(rhit.IsCalibrated()){
         answer.esum += rhit.GeV()*1000;
-        if(!hit_in_track_module(chit, trk)) answer.esum_ex += rhit.GeV()*1000;
+        if(!hit_in_track_module(chit, trk)){
+          answer.esum_ex += rhit.GeV()*1000;
+          if(!hit_in_track_coincident_module(chit, trk, sorted_hits))
+            answer.esum_ex2 += rhit.GeV()*1000;
+        }
         if(!hit_in_any_track(chit, trkhits)) answer.esum_xt += rhit.GeV()*1000;
       }
       else answer.nuncal++;

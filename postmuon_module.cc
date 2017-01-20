@@ -200,7 +200,7 @@ static bool hit_in_track_module(const rb::CellHit & chit,
     const rb::CellHit & trk_chit = *(trk.Cell(i));
 
     if(trk_chit.Plane() == chit.Plane() &&
-       same_module(trk_chit. Cell(), chit. Cell())) return true;
+       same_module(trk_chit.Cell(), chit.Cell())) return true;
   }
   return false;
 }

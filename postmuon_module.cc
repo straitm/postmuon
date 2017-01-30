@@ -129,7 +129,7 @@ const double planes_per_cell = 76./39.;
 
 /*
  Return the average hit time of the latest 40 hits (or all of them),
- in TDC counts.
+ in integer (but not multiple of anything) TDC counts.
 
  This is meant to provide a robust measure of the track time, even if
  an early Michel decay gets reconstructed as part of the track.
@@ -344,14 +344,22 @@ static void print_ntuple_line(const art::Event & __restrict__ evt,
 
   fprintf(OUT, "%d %d ", evt.run(), evt.event());
   fprintf(OUT, "%d ", answer.trk);
+  fprintf(OUT, "%f ", tracktime*USEC_PER_TDC);
   fprintf(OUT, "%d ", answer.cluster_i);
-  fprintf(OUT, "%f ", (float(answer.tsum)/answer.nhit-tracktime)*USEC_PER_TDC);
+  if(answer.nhit)
+    fprintf(OUT, "%f ", (float(answer.tsum)/answer.nhit-tracktime)*USEC_PER_TDC);
+  else
+    fprintf(OUT, "-1 ");
+
   fprintf(OUT, "%.1f %.1f %.1f ", tsx, tsy, tsz);
   fprintf(OUT, "%.1f %.1f %.1f %.3f ", tx, ty, tz, answer.mindist);
+
   if(answer.dist2sum == 0) fprintf(OUT, "0 ");
   else fprintf(OUT, "%.3f ", answer.dist2sum/answer.nhit);
+
   fprintf(OUT, "%d %.3f %.3f %.3f %.3f ",
     answer.asum, answer.esum, answer.esum_ex, answer.esum_ex2, answer.esum_xt);
+
   fprintf(OUT, "%f %d ", timeleft, answer.nhit);
   fprintf(OUT, "%d ", answer.nuncal);
   fprintf(OUT, "%d ", answer.last_accepted_time - answer.first_accepted_time);
@@ -423,7 +431,7 @@ void PostMuon::analyze(const art::Event& evt)
       }
     }
     static int NOvA = fprintf(OUT,
-      "run:event:trk:"
+      "run:event:trk:trktime:"
       "i:"
       "t:"
       "trkstartx:trkstarty:trkstartz:"
@@ -533,9 +541,8 @@ void PostMuon::analyze(const art::Event& evt)
       else answer.nuncal++;
     }
 
-    // print last cluster
-    if(answer.nhit)
-      print_ntuple_line(evt, trk, tracktime, triggerlength, answer);
+    // print last cluster, or track info if no cluster
+    print_ntuple_line(evt, trk, tracktime, triggerlength, answer);
   }
 }
 

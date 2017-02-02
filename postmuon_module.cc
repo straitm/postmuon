@@ -110,6 +110,8 @@ namespace PostMuon {
 
     int         fRemoveBadChans; ///< whether to remove bad channels
     std::string fRawDataLabel;   ///< label of where to find RawData
+    float       fMaxDistInCells; ///< Maximum distance of cluster hits
+    bool        fTracksAreDown;  ///< true: down. false: north
 
   }; // class PostMuon
 }
@@ -223,13 +225,23 @@ static bool hit_in_any_track(const rb::CellHit & chit,
 }
 
 /*
+  Returns true if we need to reverse a track based on the assumed
+  direction (down or north).
+*/
+static bool shall_we_flip_it(const rb::Track & trk, const bool tracks_are_down)
+{
+  if(tracks_are_down) return trk.Stop().Y() > trk.Start().Y();
+  else                return trk.Stop().Z() < trk.Start().Z();
+}
+
+/*
  Returns true if the track goes in the +z direction, assuming that it is
  downward-going (i.e. that it goes in the -y direction).
 */
-static bool is_increasing_z(const rb::Track & trk)
+static bool is_increasing_z(const rb::Track & trk, const bool tracks_are_down)
 {
   const bool claims_increasing_z = trk.Stop().Z() > trk.Start().Z();
-  const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
+  const bool needs_flip = shall_we_flip_it(trk, tracks_are_down);
   return claims_increasing_z ^ needs_flip;
 }
 
@@ -242,14 +254,15 @@ static bool is_increasing_z(const rb::Track & trk)
 static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
                                    const rb::CellHit & __restrict__ chit,
                                    const int lasthiti_even,
-                                   const int lasthiti_odd)
+                                   const int lasthiti_odd,
+                                   const bool tracks_are_down)
 {
   const int lastplane_even = trk.Cell(lasthiti_even)->Plane();
   const int lastplane_odd =  trk.Cell(lasthiti_odd) ->Plane();
   const int lastcell_even =  trk.Cell(lasthiti_even)->Cell();
   const int lastcell_odd =   trk.Cell(lasthiti_odd) ->Cell();
 
-  const bool increasing_z = is_increasing_z(trk);
+  const bool increasing_z = is_increasing_z(trk, tracks_are_down);
 
   const int lastplane = increasing_z?std::max(lastplane_even, lastplane_odd)
                                     :std::min(lastplane_even, lastplane_odd);
@@ -269,7 +282,9 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
 static double hit_near_track(const rb::Track & __restrict__ trk,
   const double tracktime,
   const int lasthiti_even, const int lasthiti_odd,
-  const rb::CellHit & __restrict__ chit)
+  const rb::CellHit & __restrict__ chit,
+  const float maxdist_in_cells,
+  const bool tracks_are_down)
 {
   const int aftertdc = chit.TDC();
   if(aftertdc < tracktime) return -1;
@@ -278,12 +293,8 @@ static double hit_near_track(const rb::Track & __restrict__ trk,
   // hit gets swept up into the track, this is the only way to see it.
   //if(hit_is_in_track(chit, trk)) return -1;
 
-  // Enough to catch ~99% of gammas from neutron capture according to my toy MC
-  //const double maxdist_in_cells = 20.1;
-  const double maxdist_in_cells = 4; // something much smaller for FD
-
   const double dist = dist_trackend_to_cell(trk, chit, lasthiti_even,
-                                            lasthiti_odd);
+                                            lasthiti_odd, tracks_are_down);
 
   if(dist > maxdist_in_cells) return -2;
 
@@ -296,11 +307,12 @@ static double hit_near_track(const rb::Track & __restrict__ trk,
 */
 static void last_hits(int & __restrict__ lasthiti_even,
                       int & __restrict__ lasthiti_odd,
-                      const rb::Track & __restrict__ trk)
+                      const rb::Track & __restrict__ trk,
+                      const bool tracks_are_down)
 {
   float latest_even = 1e30, latest_odd = 1e30;
 
-  const bool increasing_z = is_increasing_z(trk);
+  const bool increasing_z = is_increasing_z(trk, tracks_are_down);
   const bool decreasing_z = !increasing_z;
 
   for(int c = 0; c < (int)trk.NCell(); c++){
@@ -328,11 +340,12 @@ static void print_ntuple_line(const art::Event & __restrict__ evt,
                               const rb::Track & __restrict__ trk,
                               const double tracktime,
                               const double eventlength,
-                              const pm answer)
+                              const pm answer,
+                              const bool tracks_are_down)
 {
   const double timeleft = eventlength - tracktime*USEC_PER_TDC;
 
-  const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
+  const bool needs_flip = shall_we_flip_it(trk, tracks_are_down);
 
   const double tsx = needs_flip? trk.Stop().X(): trk.Start().X();
   const double tsy = needs_flip? trk.Stop().Y(): trk.Start().Y();
@@ -370,7 +383,9 @@ namespace PostMuon{
 
 PostMuon::PostMuon(fhicl::ParameterSet const& pset)
   : EDAnalyzer(pset), fRemoveBadChans(pset.get<bool>("RemoveBadChans")),
-  fRawDataLabel(pset.get< std::string >("RawDataLabel"))
+  fRawDataLabel(pset.get< std::string >("RawDataLabel")),
+  fMaxDistInCells(pset.get<float>("MaxDistInCells")),
+  fTracksAreDown(pset.get<bool>("TracksAreDown"))
 {
 
 }
@@ -478,17 +493,18 @@ void PostMuon::analyze(const art::Event& evt)
     if(trk.Stop().X() == 0 || trk.Stop().Y() == 0) continue;
 
     int lasthiti_even = 0, lasthiti_odd = 0;
-    last_hits(lasthiti_even, lasthiti_odd, trk);
+    last_hits(lasthiti_even, lasthiti_odd, trk, fTracksAreDown);
     const double tracktime = mean_late_track_time(trk);
 
     pm answer = mkpm();
     answer.trk = t;
-    const bool needs_flip = trk.Stop().Y() > trk.Start().Y();
+    const bool needs_flip = shall_we_flip_it(trk, fTracksAreDown);
     for(int c = first_hit_to_consider; c < (int)sorted_hits.size(); c++){
       const rb::CellHit & chit = sorted_hits[c];
 
       const double dist =
-        hit_near_track(trk, tracktime, lasthiti_even, lasthiti_odd, chit);
+        hit_near_track(trk, tracktime, lasthiti_even, lasthiti_odd,
+                       chit, fMaxDistInCells, fTracksAreDown);
 
       if(dist < 0){
         // This hit is before this track, so it will also be before
@@ -505,7 +521,7 @@ void PostMuon::analyze(const art::Event& evt)
                                            + 1*TDC_GRANULARITY;
 
       if(newcluster && answer.nhit){
-        print_ntuple_line(evt, trk, tracktime, triggerlength, answer);
+        print_ntuple_line(evt, trk, tracktime, triggerlength, answer, fTracksAreDown);
         answer.cluster_i++;
         reset_pm(answer);
       }
@@ -542,7 +558,7 @@ void PostMuon::analyze(const art::Event& evt)
     }
 
     // print last cluster, or track info if no cluster
-    print_ntuple_line(evt, trk, tracktime, triggerlength, answer);
+    print_ntuple_line(evt, trk, tracktime, triggerlength, answer, fTracksAreDown);
   }
 }
 

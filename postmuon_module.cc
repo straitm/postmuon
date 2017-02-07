@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////
-/// \brief   This module is named PostMuon and does bar.
+/// \brief   This module writes out a simple ntuple of information about
+///          hits that follow stopping muons.
 /// \author  M. Strait
-/// \date
 ////////////////////////////////////////////////////////////////////////
 
 #include "art/Framework/Principal/Run.h"
@@ -31,7 +31,8 @@
 static FILE * OUT = NULL;
 
 struct pm{
-  int nhit;
+  int nhit; // number of hits in delayed cluster
+            // TODO: seperate nhit counts for the various energy sums.
   int trk; // index of the track
   int first_accepted_time; // time of the first hit in the cluster
   int last_accepted_time; // time of the last hit in the cluster
@@ -135,6 +136,9 @@ const double planes_per_cell = 76./39.;
 
  This is meant to provide a robust measure of the track time, even if
  an early Michel decay gets reconstructed as part of the track.
+
+ This also smears out weird timing effects like those shown in
+ doc-16889-v2 which may or may not be a good thing.
 */
 static double mean_late_track_time(const rb::Track & trk)
 {

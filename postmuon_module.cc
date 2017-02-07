@@ -33,7 +33,6 @@ static int NhitTrackTimeAveraging = 1; // dummy, to be overwritten in PostMuon()
 static bool TracksAreDown = true; // to be overwritten in PostMuon()
 static double MaxDistInCells = 0.123456; // dummy as well
 
-static art::ServiceHandle<calib::Calibrator> calthing;
 
 struct evtinfo{
   int run;
@@ -340,6 +339,8 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%.1f %.1f %.1f ", tx, ty, tz);
   fprintf(OUT, "%f ", timeleft);
 
+  fprintf(OUT, "%d ", cluster.type);
+
   if(cluster.nhit)
     fprintf(OUT, "%f ",
             (float(cluster.tsum)/cluster.nhit-tinfo.time)*USEC_PER_TDC);
@@ -366,7 +367,7 @@ PostMuon::PostMuon(fhicl::ParameterSet const& pset)
   fRawDataLabel(pset.get< std::string >("RawDataLabel")),
   fMaxDistInCells(pset.get<float>("MaxDistInCells")),
   fTracksAreDown(pset.get<bool>("TracksAreDown")),
-  fNhitTrackTimeAveraging(pset.get<bool>("NhitTrackTimeAveraging"))
+  fNhitTrackTimeAveraging(pset.get<int>("NhitTrackTimeAveraging"))
 {
   NhitTrackTimeAveraging = fNhitTrackTimeAveraging;
   TracksAreDown = fTracksAreDown;
@@ -427,6 +428,8 @@ static void cluster_search(const int type,
   const std::vector<rb::CellHit> & __restrict__ trkhits,
   int & first_hit_to_consider, const trkinfo & __restrict__ tinfo)
 {
+  art::ServiceHandle<calib::Calibrator> calthing;
+
   cluster clu = mkcluster();
   clu.type = type;
 
@@ -449,13 +452,13 @@ static void cluster_search(const int type,
          (tinfo.needs_flip?tinfo.trk.Start().Y():tinfo.trk.Stop().Y()):
          (tinfo.needs_flip?tinfo.trk.Start().X():tinfo.trk.Stop().X()));
 
-    if( !rhit.IsCalibrated()
-        ||
-        (type == ex &&hit_in_track_module(chit, tinfo.trk))
-        ||
-        (type == ex2&&hit_in_track_coincident_module(chit, tinfo, sorted_hits))
-        ||
-        (type == xt &&hit_in_any_track(chit, trkhits))
+    if(!rhit.IsCalibrated()
+       ||
+       (type == ex &&hit_in_track_module(chit, tinfo.trk))
+       ||
+       (type == ex2&&hit_in_track_coincident_module(chit, tinfo, sorted_hits))
+       ||
+       (type == xt &&hit_in_any_track(chit, trkhits))
       )
       continue;
 
@@ -464,7 +467,7 @@ static void cluster_search(const int type,
     const bool newcluster = chit.TDC() > clu.last_accepted_time
                                          + 1*TDC_GRANULARITY;
 
-    if(newcluster){
+    if(newcluster && clu.nhit){
       print_ntuple_line(einfo, tinfo, clu);
       clu.i++;
       resetcluster(clu);
@@ -508,16 +511,14 @@ void PostMuon::analyze(const art::Event& evt)
   art::Handle< std::vector<rb::Track> > tracks;
   evt.getByLabel("kalmantrackmerge", tracks);
 
-  {
+  if(OUT == NULL){
+    OUT = fopen(Form("postmuon_%d_%d.20170120.ntuple",
+                     evt.run(), evt.subRun()), "w");
     if(OUT == NULL){
-      OUT = fopen(Form("postmuon_%d_%d.20170120.ntuple",
-                       evt.run(), evt.subRun()), "w");
-      if(OUT == NULL){
-         fprintf(stderr, "Could not open output ntuple file\n");
-         exit(1);
-      }
+       fprintf(stderr, "Could not open output ntuple file\n");
+       exit(1);
     }
-    static int NOvA = fprintf(OUT,
+    fprintf(OUT,
       "run:"
       "event:"
       "trk:"
@@ -531,6 +532,7 @@ void PostMuon::analyze(const art::Event& evt)
       "trkz:"
       "timeleft:"
 
+      "type:"
       "t:"
       "mindist:"
       "dist2:"
@@ -538,7 +540,6 @@ void PostMuon::analyze(const art::Event& evt)
       "nhit:"
       "tdclen"
       "\n");
-    NOvA = NOvA;
   }
 
   if(rawtrigger->empty()) return;

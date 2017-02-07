@@ -15,6 +15,11 @@ standard_postmuon:
  # false for beam, i.e. assume tracks are going
  # Default to cosmics.
  TracksAreDown: true
+
+ # This many hits from the end of the track are using to determine the track
+ # time.  Sensible values, perhaps, are 40 -- to give a good average near the
+ # end -- and 1 -- to give a clear and consistent definition.
+ NhitTrackTimeAveraging: 40
 }
 
 END_PROLOG

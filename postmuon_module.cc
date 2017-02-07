@@ -29,69 +29,56 @@
 #include "art/Framework/Core/EDAnalyzer.h"
 
 static FILE * OUT = NULL;
+static int NhitTrackTimeAveraging = 1; // dummy, to be overwritten in PostMuon()
+static bool TracksAreDown = true; // to be overwritten in PostMuon()
+static double MaxDistInCells = 0.123456; // dummy as well
 
-struct pm{
-  int nhit; // number of hits in delayed cluster
-            // TODO: seperate nhit counts for the various energy sums.
-  int trk; // index of the track
+static art::ServiceHandle<calib::Calibrator> calthing;
+
+struct evtinfo{
+  int run;
+  int event;
+  double triggerlength;
+};
+
+struct trkinfo{
+  rb::Track trk;
+  int i; // index of track in the track array
+  double time;
+  int lasthiti_even, lasthiti_odd;
+  bool needs_flip;
+};
+
+struct cluster{
+  int i; // which cluster for the given track
+  int type; // defines the set of cuts used for this cluster
   int first_accepted_time; // time of the first hit in the cluster
   int last_accepted_time; // time of the last hit in the cluster
   float mindist;  // minimum hit distance from track end
   float dist2sum; // summed hit distance from track end
   int tsum;       // summed TDC of a cluster of delayed hits
-  int asum;       // summed ADC of a cluster of delayed hits
   float esum;     // summed calibrated energy, in MeV
-  float esum_ex;  // Same, but without hits in any module where the track was,
-                  // in order to attempt to get an unbiased, sag-free measurement
-  float esum_ex2; // Same, but also excluding any module that had a hit coincident
-                  // with the track, where anything within 0.4us counts as
-                  // coincident.  This is 2-3 sigma in the time resolution and
-                  // should catch almost all hits that are prompt, either muon
-                  // hits that didn't get reconstructed as part of the track,
-                  // or brems, or x-rays from muon atomic capture, or whatever else.
-  float esum_xt;  // Same, but without hits that are part of any tracks,
-                  // in an attempt to beat down uncorrelated background (doesn't seem
-                  // to have much effect -- maybe 5-10%.)
-  int nuncal;     // number of uncalibrated hits
-  int cluster_i;
+  int nhit;       // number of hits in full delayed cluster
 };
 
-static pm mkpm()
+static void resetcluster(cluster & res)
 {
-  pm res;
-  res.nhit = 0;
-  res.trk = 0;
   res.first_accepted_time = -1000000;
   res.last_accepted_time  = -1000000;
   res.mindist = 1000000;
   res.dist2sum = 0;
   res.tsum = 0;
-  res.asum = 0;
   res.esum = 0;
-  res.esum_ex = 0;
-  res.esum_ex2 = 0;
-  res.esum_xt = 0;
-  res.cluster_i = 0;
-  res.nuncal = 0;
-  return res;
+  res.nhit = 0;
 }
 
-static void reset_pm(pm & res)
+static cluster mkcluster()
 {
-  res.nhit = 0;
-  // do not change trk
-  res.first_accepted_time = -1000000;
-  res.last_accepted_time  = -1000000;
-  res.mindist = 1000000;
-  res.dist2sum = 0;
-  res.tsum = 0;
-  res.asum = 0;
-  res.esum = 0;
-  res.esum_ex = 0;
-  res.esum_ex2 = 0;
-  res.esum_xt = 0;
-  res.nuncal = 0;
-  // do not change cluster_i
+  cluster res;
+  resetcluster(res);
+  res.i = 0;
+  res.type = 0;
+  return res;
 }
 
 namespace PostMuon {
@@ -113,6 +100,7 @@ namespace PostMuon {
     std::string fRawDataLabel;   ///< label of where to find RawData
     float       fMaxDistInCells; ///< Maximum distance of cluster hits
     bool        fTracksAreDown;  ///< true: down. false: north
+    int         fNhitTrackTimeAveraging; ///< N hits for track time average
 
   }; // class PostMuon
 }
@@ -131,14 +119,14 @@ const int TDC_GRANULARITY = 4;
 const double planes_per_cell = 76./39.;
 
 /*
- Return the average hit time of the latest 40 hits (or all of them),
- in integer (but not multiple of anything) TDC counts.
+  Return the average hit time of the latest 'NhitTrackTimeAveraging' hits, in
+  integer (but not multiple of anything) TDC counts.
 
- This is meant to provide a robust measure of the track time, even if
- an early Michel decay gets reconstructed as part of the track.
-
- This also smears out weird timing effects like those shown in
- doc-16889-v2 which may or may not be a good thing.
+  With a largish 'NhitTrackTimeAveraging', this is meant to provide a robust
+  measure of the track time, even if an early Michel decay gets
+  reconstructed as part of the track. This also smears out weird timing
+  effects like those shown in doc-16889-v2 which may or may not be a
+  good thing.
 */
 static double mean_late_track_time(const rb::Track & trk)
 {
@@ -148,14 +136,12 @@ static double mean_late_track_time(const rb::Track & trk)
 
   std::sort(tdcs.begin(), tdcs.end());
 
-  const int max_for_avg = 40;
-
   double acc = 0;
-  for(unsigned int i = std::max(0, (int)tdcs.size() - max_for_avg);
+  for(unsigned int i = std::max(0, (int)tdcs.size() - NhitTrackTimeAveraging);
       i < tdcs.size(); i++)
     acc += tdcs[i];
 
-  return int(acc / std::min(max_for_avg, (int)tdcs.size()) + 0.5);
+  return int(acc / std::min(NhitTrackTimeAveraging, (int)tdcs.size()) + 0.5);
 }
 
 // Returns true if two cells (given that they are in the
@@ -173,19 +159,18 @@ static bool same_module(const int cell1, const int cell2)
   track itself, this is meant to do better at excluding cells that are
   inefficient.
 */
-static bool hit_in_track_coincident_module(const rb::CellHit & chit,
-                                           const rb::Track & trk,
-                                           const std::vector<rb::CellHit> & sorted_hits)
+static bool hit_in_track_coincident_module(
+  const rb::CellHit & __restrict__ chit,
+  const trkinfo & __restrict__ tinfo,
+  const std::vector<rb::CellHit> & __restrict__ sorted_hits)
 {
   const double timecut = 0.4/USEC_PER_TDC;
-
-  const double tracktime = mean_late_track_time(trk);
 
   for(unsigned int i = 0; i < sorted_hits.size(); i++){
     const rb::CellHit & coin_chit = sorted_hits[i];
 
-    if(tracktime - coin_chit.TDC() > +timecut) continue;
-    if(tracktime - coin_chit.TDC() < -timecut) break;
+    if(tinfo.time - coin_chit.TDC() > +timecut) continue;
+    if(tinfo.time - coin_chit.TDC() < -timecut) break;
 
     if(coin_chit.Plane() == chit.Plane() &&
        same_module(coin_chit.Cell(), chit.Cell())) return true;
@@ -232,41 +217,39 @@ static bool hit_in_any_track(const rb::CellHit & chit,
   Returns true if we need to reverse a track based on the assumed
   direction (down or north).
 */
-static bool shall_we_flip_it(const rb::Track & trk, const bool tracks_are_down)
+static bool shall_we_flip_it(const rb::Track & trk)
 {
-  if(tracks_are_down) return trk.Stop().Y() > trk.Start().Y();
-  else                return trk.Stop().Z() < trk.Start().Z();
+  if(TracksAreDown) return trk.Stop().Y() > trk.Start().Y();
+  else              return trk.Stop().Z() < trk.Start().Z();
 }
 
 /*
  Returns true if the track goes in the +z direction, assuming that it is
  downward-going (i.e. that it goes in the -y direction).
 */
-static bool is_increasing_z(const rb::Track & trk, const bool tracks_are_down)
+static bool is_increasing_z(const rb::Track & trk)
 {
   const bool claims_increasing_z = trk.Stop().Z() > trk.Start().Z();
-  const bool needs_flip = shall_we_flip_it(trk, tracks_are_down);
+  const bool needs_flip = shall_we_flip_it(trk);
   return claims_increasing_z ^ needs_flip;
 }
 
 /*
   Takes a track and a hit and determines the distance between the
   end of the track and the hit.  lasthiti_{even,odd} are the indices
-  of the last hits in each view assuming that the track is going in the
-  -y direction (down).
+  of the last hits in each view.
 */
 static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
                                    const rb::CellHit & __restrict__ chit,
                                    const int lasthiti_even,
-                                   const int lasthiti_odd,
-                                   const bool tracks_are_down)
+                                   const int lasthiti_odd)
 {
   const int lastplane_even = trk.Cell(lasthiti_even)->Plane();
   const int lastplane_odd =  trk.Cell(lasthiti_odd) ->Plane();
   const int lastcell_even =  trk.Cell(lasthiti_even)->Cell();
   const int lastcell_odd =   trk.Cell(lasthiti_odd) ->Cell();
 
-  const bool increasing_z = is_increasing_z(trk, tracks_are_down);
+  const bool increasing_z = is_increasing_z(trk);
 
   const int lastplane = increasing_z?std::max(lastplane_even, lastplane_odd)
                                     :std::min(lastplane_even, lastplane_odd);
@@ -283,24 +266,20 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
   in cells.  Otherwise, return -1 if the hit preceeds the track, or -2
   if it is too far away.
 */
-static double hit_near_track(const rb::Track & __restrict__ trk,
-  const double tracktime,
-  const int lasthiti_even, const int lasthiti_odd,
-  const rb::CellHit & __restrict__ chit,
-  const float maxdist_in_cells,
-  const bool tracks_are_down)
+static double hit_near_track(const trkinfo & __restrict__ tinfo,
+  const rb::CellHit & __restrict__ chit)
 {
   const int aftertdc = chit.TDC();
-  if(aftertdc < tracktime) return -1;
+  if(aftertdc < tinfo.time) return -1;
 
   // Accept the hit even if it is in the track!  Because if a Michel
   // hit gets swept up into the track, this is the only way to see it.
   //if(hit_is_in_track(chit, trk)) return -1;
 
-  const double dist = dist_trackend_to_cell(trk, chit, lasthiti_even,
-                                            lasthiti_odd, tracks_are_down);
+  const double dist = dist_trackend_to_cell(tinfo.trk, chit, tinfo.lasthiti_even,
+                                            tinfo.lasthiti_odd);
 
-  if(dist > maxdist_in_cells) return -2;
+  if(dist > MaxDistInCells) return -2;
 
   return dist;
 }
@@ -311,12 +290,11 @@ static double hit_near_track(const rb::Track & __restrict__ trk,
 */
 static void last_hits(int & __restrict__ lasthiti_even,
                       int & __restrict__ lasthiti_odd,
-                      const rb::Track & __restrict__ trk,
-                      const bool tracks_are_down)
+                      const rb::Track & __restrict__ trk)
 {
   float latest_even = 1e30, latest_odd = 1e30;
 
-  const bool increasing_z = is_increasing_z(trk, tracks_are_down);
+  const bool increasing_z = is_increasing_z(trk);
   const bool decreasing_z = !increasing_z;
 
   for(int c = 0; c < (int)trk.NCell(); c++){
@@ -340,46 +318,44 @@ static void last_hits(int & __restrict__ lasthiti_even,
   }
 }
 
-static void print_ntuple_line(const art::Event & __restrict__ evt,
-                              const rb::Track & __restrict__ trk,
-                              const double tracktime,
-                              const double eventlength,
-                              const pm answer,
-                              const bool tracks_are_down)
+static void print_ntuple_line(const evtinfo & __restrict__ einfo,
+                              const trkinfo & __restrict__ tinfo,
+                              const cluster & __restrict__ cluster)
 {
-  const double timeleft = eventlength - tracktime*USEC_PER_TDC;
+  const double timeleft = einfo.triggerlength - tinfo.time*USEC_PER_TDC;
 
-  const bool needs_flip = shall_we_flip_it(trk, tracks_are_down);
+  const double tsx = tinfo.needs_flip? tinfo.trk.Stop().X(): tinfo.trk.Start().X();
+  const double tsy = tinfo.needs_flip? tinfo.trk.Stop().Y(): tinfo.trk.Start().Y();
+  const double tsz = tinfo.needs_flip? tinfo.trk.Stop().Z(): tinfo.trk.Start().Z();
 
-  const double tsx = needs_flip? trk.Stop().X(): trk.Start().X();
-  const double tsy = needs_flip? trk.Stop().Y(): trk.Start().Y();
-  const double tsz = needs_flip? trk.Stop().Z(): trk.Start().Z();
+  const double tx = tinfo.needs_flip? tinfo.trk.Start().X(): tinfo.trk.Stop().X();
+  const double ty = tinfo.needs_flip? tinfo.trk.Start().Y(): tinfo.trk.Stop().Y();
+  const double tz = tinfo.needs_flip? tinfo.trk.Start().Z(): tinfo.trk.Stop().Z();
 
-  const double tx = needs_flip? trk.Start().X(): trk.Stop().X();
-  const double ty = needs_flip? trk.Start().Y(): trk.Stop().Y();
-  const double tz = needs_flip? trk.Start().Z(): trk.Stop().Z();
+  fprintf(OUT, "%d %d ", einfo.run, einfo.event);
+  fprintf(OUT, "%d ", tinfo.i);
+  fprintf(OUT, "%f ", tinfo.time*USEC_PER_TDC);
+  fprintf(OUT, "%d ", cluster.i);
+  fprintf(OUT, "%.1f %.1f %.1f ", tsx, tsy, tsz);
+  fprintf(OUT, "%.1f %.1f %.1f ", tx, ty, tz);
+  fprintf(OUT, "%f ", timeleft);
 
-  fprintf(OUT, "%d %d ", evt.run(), evt.event());
-  fprintf(OUT, "%d ", answer.trk);
-  fprintf(OUT, "%f ", tracktime*USEC_PER_TDC);
-  fprintf(OUT, "%d ", answer.cluster_i);
-  if(answer.nhit)
-    fprintf(OUT, "%f ", (float(answer.tsum)/answer.nhit-tracktime)*USEC_PER_TDC);
+  if(cluster.nhit)
+    fprintf(OUT, "%f ",
+            (float(cluster.tsum)/cluster.nhit-tinfo.time)*USEC_PER_TDC);
   else
     fprintf(OUT, "-1 ");
 
-  fprintf(OUT, "%.1f %.1f %.1f ", tsx, tsy, tsz);
-  fprintf(OUT, "%.1f %.1f %.1f %.3f ", tx, ty, tz, answer.mindist);
+  fprintf(OUT, "%.3f ", cluster.mindist);
 
-  if(answer.dist2sum == 0) fprintf(OUT, "0 ");
-  else fprintf(OUT, "%.3f ", answer.dist2sum/answer.nhit);
+  if(cluster.dist2sum == 0) fprintf(OUT, "0 ");
+  else fprintf(OUT, "%.3f ", cluster.dist2sum/cluster.nhit);
 
-  fprintf(OUT, "%d %.3f %.3f %.3f %.3f ",
-    answer.asum, answer.esum, answer.esum_ex, answer.esum_ex2, answer.esum_xt);
+  fprintf(OUT, "%.3f ", cluster.esum);
 
-  fprintf(OUT, "%f %d ", timeleft, answer.nhit);
-  fprintf(OUT, "%d ", answer.nuncal);
-  fprintf(OUT, "%d ", answer.last_accepted_time - answer.first_accepted_time);
+  fprintf(OUT, "%d ", cluster.nhit);
+  fprintf(OUT, "%d ",
+          cluster.last_accepted_time - cluster.first_accepted_time);
   fprintf(OUT, "\n");
 }
 
@@ -389,9 +365,12 @@ PostMuon::PostMuon(fhicl::ParameterSet const& pset)
   : EDAnalyzer(pset), fRemoveBadChans(pset.get<bool>("RemoveBadChans")),
   fRawDataLabel(pset.get< std::string >("RawDataLabel")),
   fMaxDistInCells(pset.get<float>("MaxDistInCells")),
-  fTracksAreDown(pset.get<bool>("TracksAreDown"))
+  fTracksAreDown(pset.get<bool>("TracksAreDown")),
+  fNhitTrackTimeAveraging(pset.get<bool>("NhitTrackTimeAveraging"))
 {
-
+  NhitTrackTimeAveraging = fNhitTrackTimeAveraging;
+  TracksAreDown = fTracksAreDown;
+  MaxDistInCells = fMaxDistInCells;
 }
 
 void PostMuon::endJob()
@@ -424,6 +403,94 @@ static std::vector<rb::CellHit> make_trkhits(const std::vector<rb::Track> & trks
   return answer;
 }
 
+/*
+all: all hits passing basic cuts
+
+ex: Without hits in any module where the track was, in order to attempt
+to get an unbiased, sag-free measurement
+
+ex2: Same, but also excluding any module that had a hit coincident with
+the track, where anything within 0.4us counts as coincident. This is 2-3
+sigma in the time resolution and should catch almost all hits that are
+prompt, either muon hits that didn't get reconstructed as part of the
+track, or brems, or x-rays from muon atomic capture, or whatever else.
+
+xt: Same, but without hits that are part of any tracks, in an attempt to
+beat down uncorrelated background (doesn't seem to have much effect --
+maybe 5-10%.)
+*/
+enum clustertype { all, ex, ex2, xt };
+
+static void cluster_search(const int type,
+  const evtinfo & __restrict__ einfo,
+  const std::vector<rb::CellHit> & __restrict__ sorted_hits,
+  const std::vector<rb::CellHit> & __restrict__ trkhits,
+  int & first_hit_to_consider, const trkinfo & __restrict__ tinfo)
+{
+  cluster clu = mkcluster();
+  clu.type = type;
+
+  for(int c = first_hit_to_consider; c < (int)sorted_hits.size(); c++){
+    const rb::CellHit & chit = sorted_hits[c];
+
+    const double dist = hit_near_track(tinfo, chit);
+
+    if(dist < 0){
+      // This hit is before this track, so it will also be next time we look
+      // and for all further tracks. ~5% speed bump from this optimization.
+      if(dist == -1) first_hit_to_consider = c+1;
+
+      continue;
+    }
+
+    const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
+       // If the hit is in X, it needs a Y plane to provide W
+       chit.View() == geo::kX?
+         (tinfo.needs_flip?tinfo.trk.Start().Y():tinfo.trk.Stop().Y()):
+         (tinfo.needs_flip?tinfo.trk.Start().X():tinfo.trk.Stop().X()));
+
+    if( !rhit.IsCalibrated()
+        ||
+        (type == ex &&hit_in_track_module(chit, tinfo.trk))
+        ||
+        (type == ex2&&hit_in_track_coincident_module(chit, tinfo, sorted_hits))
+        ||
+        (type == xt &&hit_in_any_track(chit, trkhits))
+      )
+      continue;
+
+    // Hits are time ordered.  Only report on hits that are separated
+    // in time from other accepted hits by at least 1 quiet TDC tick.
+    const bool newcluster = chit.TDC() > clu.last_accepted_time
+                                         + 1*TDC_GRANULARITY;
+
+    if(newcluster){
+      print_ntuple_line(einfo, tinfo, clu);
+      clu.i++;
+      resetcluster(clu);
+    }
+
+    // Add everything to the cluster *after* the print of the
+    // previous cluster (or no-op).
+
+    clu.nhit++;
+
+    clu.dist2sum += dist*dist;
+    if(dist < clu.mindist) clu.mindist = dist;
+
+    clu.last_accepted_time = chit.TDC();
+    if(clu.first_accepted_time < 0)
+      clu.first_accepted_time = chit.TDC();
+    clu.tsum += chit.TDC();
+
+    clu.esum += rhit.GeV()*1000;
+
+  }
+
+  // print last cluster, or track info if no cluster
+  print_ntuple_line(einfo, tinfo, clu);
+}
+
 PostMuon::~PostMuon() { }
 
 void PostMuon::analyze(const art::Event& evt)
@@ -443,33 +510,45 @@ void PostMuon::analyze(const art::Event& evt)
 
   {
     if(OUT == NULL){
-      OUT = fopen(Form("postmuon_%d_%d.20170120.ntuple", evt.run(), evt.subRun()), "w");
+      OUT = fopen(Form("postmuon_%d_%d.20170120.ntuple",
+                       evt.run(), evt.subRun()), "w");
       if(OUT == NULL){
          fprintf(stderr, "Could not open output ntuple file\n");
          exit(1);
       }
     }
     static int NOvA = fprintf(OUT,
-      "run:event:trk:trktime:"
+      "run:"
+      "event:"
+      "trk:"
+      "trktime:"
       "i:"
+      "trkstartx:"
+      "trkstarty:"
+      "trkstartz:"
+      "trkx:"
+      "trky:"
+      "trkz:"
+      "timeleft:"
+
       "t:"
-      "trkstartx:trkstarty:trkstartz:"
-      "trkx:trky:trkz:mindist:"
+      "mindist:"
       "dist2:"
-      "adc:e:eex:eex2:ext:"
-      "timeleft:nhit:"
-      "nuncal:"
+      "e:"
+      "nhit:"
       "tdclen"
       "\n");
     NOvA = NOvA;
   }
 
-  art::ServiceHandle<calib::Calibrator> calthing;
-
   if(rawtrigger->empty()) return;
 
-  const double triggerlength = (*rawtrigger)[0].
+  evtinfo einfo;
+
+  einfo.triggerlength = (*rawtrigger)[0].
     fTriggerRange_TriggerLength*USEC_PER_MICROSLICE;
+  einfo.run = evt.run();
+  einfo.event = evt.event();
 
   // CellHits do *not* come in time order
   std::vector<rb::CellHit> sorted_hits;
@@ -481,8 +560,13 @@ void PostMuon::analyze(const art::Event& evt)
 
   std::vector<rb::Track> sorted_tracks;
   if(!tracks->empty()){
-    for(int c = 0; c < (int)tracks->size(); c++)
+    for(int c = 0; c < (int)tracks->size(); c++){
+      // Badly tracked tracks are not useful
+      if((*tracks)[c].Stop().X() == 0 ||
+         (*tracks)[c].Stop().Y() == 0) continue;
+
       sorted_tracks.push_back((*tracks)[c]);
+    }
     std::sort(sorted_tracks.begin(), sorted_tracks.end(), compare_track);
   }
 
@@ -493,76 +577,18 @@ void PostMuon::analyze(const art::Event& evt)
   for(unsigned int t = 0; t < sorted_tracks.size(); t++){
     const rb::Track & trk = sorted_tracks[t];
 
-    // Badly tracked tracks are not useful
-    if(trk.Stop().X() == 0 || trk.Stop().Y() == 0) continue;
+    trkinfo tinfo;
+    tinfo.lasthiti_even = 0, tinfo.lasthiti_odd = 0;
+    last_hits(tinfo.lasthiti_even, tinfo.lasthiti_odd, trk);
+    tinfo.time = mean_late_track_time(trk);
+    tinfo.needs_flip = shall_we_flip_it(trk);
+    tinfo.trk = trk;
+    tinfo.i = t;
 
-    int lasthiti_even = 0, lasthiti_odd = 0;
-    last_hits(lasthiti_even, lasthiti_odd, trk, fTracksAreDown);
-    const double tracktime = mean_late_track_time(trk);
-
-    pm answer = mkpm();
-    answer.trk = t;
-    const bool needs_flip = shall_we_flip_it(trk, fTracksAreDown);
-    for(int c = first_hit_to_consider; c < (int)sorted_hits.size(); c++){
-      const rb::CellHit & chit = sorted_hits[c];
-
-      const double dist =
-        hit_near_track(trk, tracktime, lasthiti_even, lasthiti_odd,
-                       chit, fMaxDistInCells, fTracksAreDown);
-
-      if(dist < 0){
-        // This hit is before this track, so it will also be before
-        // all further tracks (since we sorted the tracks above). ~5%
-        // speed bump from this optimization.
-        if(dist == -1) first_hit_to_consider = c+1;
-
-        continue;
-      }
-
-      // Hits are time ordered.  Only report on hits that are separated
-      // in time from other accepted hits by at least 1 quiet TDC tick.
-      const bool newcluster = chit.TDC() > answer.last_accepted_time
-                                           + 1*TDC_GRANULARITY;
-
-      if(newcluster && answer.nhit){
-        print_ntuple_line(evt, trk, tracktime, triggerlength, answer, fTracksAreDown);
-        answer.cluster_i++;
-        reset_pm(answer);
-      }
-
-      // Add everthing to the cluster *after* the print of the
-      // previous cluster (or no-op).
-
-      answer.nhit++;
-
-      const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
-         // If the hit is in X, it needs a Y plane to provide W
-         chit.View() == geo::kX? (needs_flip?trk.Start().Y():trk.Stop().Y()):
-                                 (needs_flip?trk.Start().X():trk.Stop().X()));
-
-      answer.dist2sum += dist*dist;
-      if(dist < answer.mindist) answer.mindist = dist;
-
-      answer.last_accepted_time = chit.TDC();
-      if(answer.first_accepted_time < 0)
-        answer.first_accepted_time = chit.TDC();
-      answer.tsum += chit.TDC();
-      answer.asum += chit.ADC();
-
-      if(rhit.IsCalibrated()){
-        answer.esum += rhit.GeV()*1000;
-        if(!hit_in_track_module(chit, trk)){
-          answer.esum_ex += rhit.GeV()*1000;
-          if(!hit_in_track_coincident_module(chit, trk, sorted_hits))
-            answer.esum_ex2 += rhit.GeV()*1000;
-        }
-        if(!hit_in_any_track(chit, trkhits)) answer.esum_xt += rhit.GeV()*1000;
-      }
-      else answer.nuncal++;
-    }
-
-    // print last cluster, or track info if no cluster
-    print_ntuple_line(evt, trk, tracktime, triggerlength, answer, fTracksAreDown);
+    cluster_search(all, einfo, sorted_hits, trkhits, first_hit_to_consider, tinfo);
+    cluster_search(ex,  einfo, sorted_hits, trkhits, first_hit_to_consider, tinfo);
+    cluster_search(ex2, einfo, sorted_hits, trkhits, first_hit_to_consider, tinfo);
+    cluster_search(xt,  einfo, sorted_hits, trkhits, first_hit_to_consider, tinfo);
   }
 }
 

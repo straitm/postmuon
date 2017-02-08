@@ -108,8 +108,9 @@ namespace PostMuon {
 static double USEC_PER_TDC = 1./64.;     // yes, really it is
 static double USEC_PER_MICROSLICE = 0.5; // XXX right?
 
-// At least in runs 19107 and 19108, TDCs seem to only come in multiples
-// of 4.  Not true later, maybe, because of multipoint readout?
+// TDCs seem to only come in multiples of 4, even with multipoint
+// readout. So the timing granularity is 1/16 microsecond even though a
+// TDC unit is 1/64 microsecond.
 const int TDC_GRANULARITY = 4;
 
 // Geometrically about correct, but perhaps should be scaled by density or

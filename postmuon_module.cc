@@ -55,7 +55,7 @@ struct cluster{
   int last_accepted_time; // time of the last hit in the cluster
   float mindist;  // minimum hit distance from track end
   float dist2sum; // summed hit distance from track end
-  int tsum;       // summed TDC of a cluster of delayed hits
+  int tsum;       // summed times, in ns, of a cluster of delayed hits
   float esum;     // summed calibrated energy, in MeV
   int nhit;       // number of hits in full delayed cluster
 };
@@ -105,13 +105,7 @@ namespace PostMuon {
 }
 
 
-static double USEC_PER_TDC = 1./64.;     // yes, really it is
-static double USEC_PER_MICROSLICE = 0.5; // XXX right?
-
-// TDCs seem to only come in multiples of 4, even with multipoint
-// readout. So the timing granularity is 1/16 microsecond even though a
-// TDC unit is 1/64 microsecond.
-const int TDC_GRANULARITY = 4;
+static double NS_PER_MICROSLICE = 500;
 
 // Geometrically about correct, but perhaps should be scaled by density or
 // radiation length or neutron cross section or something.  Or not, since
@@ -120,7 +114,7 @@ const double planes_per_cell = 76./39.;
 
 /*
   Return the average hit time of the latest 'NhitTrackTimeAveraging' hits, in
-  integer (but not multiple of anything) TDC counts.
+  nanoseconds.
 
   With a largish 'NhitTrackTimeAveraging', this is meant to provide a robust
   measure of the track time, even if an early Michel decay gets
@@ -130,18 +124,18 @@ const double planes_per_cell = 76./39.;
 */
 static double mean_late_track_time(const rb::Track & trk)
 {
-  std::vector<int> tdcs;
+  std::vector<double> times;
   for(unsigned int i = 0; i < trk.NCell(); i++)
-    tdcs.push_back(trk.Cell(i)->TDC());
+    times.push_back(trk.Cell(i)->TNS());
 
-  std::sort(tdcs.begin(), tdcs.end());
+  std::sort(times.begin(), times.end());
 
   double acc = 0;
-  for(unsigned int i = std::max(0, (int)tdcs.size() - NhitTrackTimeAveraging);
-      i < tdcs.size(); i++)
-    acc += tdcs[i];
+  for(unsigned int i = std::max(0, (int)times.size() - NhitTrackTimeAveraging);
+      i < times.size(); i++)
+    acc += times[i];
 
-  return int(acc / std::min(NhitTrackTimeAveraging, (int)tdcs.size()) + 0.5);
+  return acc / std::min(NhitTrackTimeAveraging, (int)times.size());
 }
 
 // Returns true if two cells (given that they are in the
@@ -164,13 +158,13 @@ static bool hit_in_track_coincident_module(
   const trkinfo & __restrict__ tinfo,
   const std::vector<rb::CellHit> & __restrict__ sorted_hits)
 {
-  const double timecut = 0.4/USEC_PER_TDC;
+  const double timecut = 400; // ns
 
   for(unsigned int i = 0; i < sorted_hits.size(); i++){
     const rb::CellHit & coin_chit = sorted_hits[i];
 
-    if(tinfo.time - coin_chit.TDC() > +timecut) continue;
-    if(tinfo.time - coin_chit.TDC() < -timecut) break;
+    if(tinfo.time - coin_chit.TNS() > +timecut) continue;
+    if(tinfo.time - coin_chit.TNS() < -timecut) break;
 
     if(coin_chit.Plane() == chit.Plane() &&
        same_module(coin_chit.Cell(), chit.Cell())) return true;
@@ -224,11 +218,12 @@ static bool shall_we_flip_it(const rb::Track & trk)
 }
 
 /*
- Returns true if the track goes in the +z direction, assuming that it is
- downward-going (i.e. that it goes in the -y direction).
+ Returns true if the track goes in the +z direction, after we 
+ correct the direction to be downward-going or forward-going.
 */
 static bool is_increasing_z(const rb::Track & trk)
 {
+  if(!TracksAreDown) return true;
   const bool claims_increasing_z = trk.Stop().Z() > trk.Start().Z();
   const bool needs_flip = shall_we_flip_it(trk);
   return claims_increasing_z ^ needs_flip;
@@ -269,8 +264,8 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
 static double hit_near_track(const trkinfo & __restrict__ tinfo,
   const rb::CellHit & __restrict__ chit)
 {
-  const int aftertdc = chit.TDC();
-  if(aftertdc < tinfo.time) return -1;
+  const int aftertime = chit.TNS();
+  if(aftertime < tinfo.time) return -1;
 
   // Accept the hit even if it is in the track!  Because if a Michel
   // hit gets swept up into the track, this is the only way to see it.
@@ -322,7 +317,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
                               const trkinfo & __restrict__ tinfo,
                               const cluster & __restrict__ cluster)
 {
-  const double timeleft = einfo.triggerlength - tinfo.time*USEC_PER_TDC;
+  const double timeleft = einfo.triggerlength - tinfo.time;
 
   const double tsx = tinfo.needs_flip? tinfo.trk.Stop().X(): tinfo.trk.Start().X();
   const double tsy = tinfo.needs_flip? tinfo.trk.Stop().Y(): tinfo.trk.Start().Y();
@@ -334,7 +329,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
 
   fprintf(OUT, "%d %d ", einfo.run, einfo.event);
   fprintf(OUT, "%d ", tinfo.i);
-  fprintf(OUT, "%f ", tinfo.time*USEC_PER_TDC);
+  fprintf(OUT, "%f ", tinfo.time);
   fprintf(OUT, "%d ", cluster.i);
   fprintf(OUT, "%.1f %.1f %.1f ", tsx, tsy, tsz);
   fprintf(OUT, "%.1f %.1f %.1f ", tx, ty, tz);
@@ -344,7 +339,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
 
   if(cluster.nhit)
     fprintf(OUT, "%f ",
-            (float(cluster.tsum)/cluster.nhit-tinfo.time)*USEC_PER_TDC);
+            float(cluster.tsum)/cluster.nhit-tinfo.time);
   else
     fprintf(OUT, "-1 ");
 
@@ -393,7 +388,7 @@ static bool compare_track(const rb::Track & __restrict__ a,
 static bool compare_cellhit(const rb::CellHit & __restrict__ a,
                             const rb::CellHit & __restrict__ b)
 {
-  return a.TDC() < b.TDC();
+  return a.TNS() < b.TNS();
 }
 
 static std::vector<rb::CellHit> make_trkhits(const std::vector<rb::Track> & trks)
@@ -417,7 +412,7 @@ sigma in the time resolution and should catch almost all hits that are
 prompt, either muon hits that didn't get reconstructed as part of the
 track, or brems, or x-rays from muon atomic capture, or whatever else.
 
-xt: Same, but without hits that are part of any tracks, in an attempt to
+xt: Same as ex, but without hits that are part of any tracks, in an attempt to
 beat down uncorrelated background (doesn't seem to have much effect --
 maybe 5-10%.)
 */
@@ -464,9 +459,9 @@ static void cluster_search(const int type,
       continue;
 
     // Hits are time ordered.  Only report on hits that are separated
-    // in time from other accepted hits by at least 1 quiet TDC tick.
-    const bool newcluster = chit.TDC() > clu.last_accepted_time
-                                         + 1*TDC_GRANULARITY;
+    // in time from other accepted hits by at least 100ns, which is 
+    // a bit longer than 1 TDC tick (1/16us).
+    const bool newcluster = chit.TNS() > clu.last_accepted_time + 100;
 
     if(newcluster && clu.nhit){
       print_ntuple_line(einfo, tinfo, clu);
@@ -482,10 +477,10 @@ static void cluster_search(const int type,
     clu.dist2sum += dist*dist;
     if(dist < clu.mindist) clu.mindist = dist;
 
-    clu.last_accepted_time = chit.TDC();
+    clu.last_accepted_time = chit.TNS();
     if(clu.first_accepted_time < 0)
-      clu.first_accepted_time = chit.TDC();
-    clu.tsum += chit.TDC();
+      clu.first_accepted_time = chit.TNS();
+    clu.tsum += chit.TNS();
 
     clu.esum += rhit.GeV()*1000;
 
@@ -548,7 +543,7 @@ void PostMuon::analyze(const art::Event& evt)
   evtinfo einfo;
 
   einfo.triggerlength = (*rawtrigger)[0].
-    fTriggerRange_TriggerLength*USEC_PER_MICROSLICE;
+    fTriggerRange_TriggerLength*NS_PER_MICROSLICE;
   einfo.run = evt.run();
   einfo.event = evt.event();
 

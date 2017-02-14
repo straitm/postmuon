@@ -281,16 +281,20 @@ static double hit_near_track(const trkinfo & __restrict__ tinfo,
 
 /*
   Passes back the last hit in each plane, assuming that the track is
-  downwards-going (i.e. in the -y direction).
+  going the direction we have decided it is going (down or forward).
 */
 static void last_hits(int & __restrict__ lasthiti_even,
                       int & __restrict__ lasthiti_odd,
                       const rb::Track & __restrict__ trk)
 {
-  float latest_even = 1e30, latest_odd = 1e30;
-
   const bool increasing_z = is_increasing_z(trk);
   const bool decreasing_z = !increasing_z;
+
+  // ug.
+  float latest_even = 1e30, latest_odd = 1e30;
+  if(increasing_z){
+    latest_even = -1e30; latest_odd = -1e30;
+  }
 
   for(int c = 0; c < (int)trk.NCell(); c++){
     const rb::CellHit & chit = *(trk.Cell(c));

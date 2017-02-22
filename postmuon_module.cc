@@ -55,8 +55,10 @@ struct cluster{
   int last_accepted_time; // time of the last hit in the cluster
   float mindist;  // minimum hit distance from track end
   float dist2sum; // summed hit distance from track end
-  int tsum;       // summed times, in ns, of a cluster of delayed hits
+  float tsum;     // summed times, in ns, of a cluster of delayed hits
+  float previous_cluster_t; // what it says
   float esum;     // summed calibrated energy, in MeV
+  float pesum;    // summed PE
   int nhit;       // number of hits in full delayed cluster
 };
 
@@ -68,7 +70,9 @@ static void resetcluster(cluster & res)
   res.dist2sum = 0;
   res.tsum = 0;
   res.esum = 0;
+  res.pesum = 0;
   res.nhit = 0;
+  res.previous_cluster_t = 0;
 }
 
 static cluster mkcluster()
@@ -347,12 +351,15 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   else
     fprintf(OUT, "-1 ");
 
+  fprintf(OUT, "%f ", cluster.previous_cluster_t);
+
   fprintf(OUT, "%.3f ", cluster.mindist);
 
   if(cluster.dist2sum == 0) fprintf(OUT, "0 ");
   else fprintf(OUT, "%.3f ", cluster.dist2sum/cluster.nhit);
 
   fprintf(OUT, "%.3f ", cluster.esum);
+  fprintf(OUT, "%.3f ", cluster.pesum);
 
   fprintf(OUT, "%d ", cluster.nhit);
   fprintf(OUT, "%d ",
@@ -431,6 +438,7 @@ static void cluster_search(const int type,
   art::ServiceHandle<calib::Calibrator> calthing;
 
   cluster clu = mkcluster();
+  clu.i = 0;
   clu.type = type;
 
   for(int c = first_hit_to_consider; c < (int)sorted_hits.size(); c++){
@@ -470,7 +478,9 @@ static void cluster_search(const int type,
     if(newcluster && clu.nhit){
       print_ntuple_line(einfo, tinfo, clu);
       clu.i++;
+      const float thistime = float(clu.tsum)/clu.nhit;
       resetcluster(clu);
+      clu.previous_cluster_t = thistime;
     }
 
     // Add everything to the cluster *after* the print of the
@@ -487,7 +497,7 @@ static void cluster_search(const int type,
     clu.tsum += chit.TNS();
 
     clu.esum += rhit.GeV()*1000;
-
+    clu.pesum += chit.PE();
   }
 
   // print last cluster, or track info if no cluster
@@ -519,26 +529,27 @@ void PostMuon::analyze(const art::Event& evt)
        exit(1);
     }
     fprintf(OUT,
-      "run:"
-      "event:"
-      "trk:"
-      "trktime:"
-      "i:"
-      "trkstartx:"
-      "trkstarty:"
-      "trkstartz:"
-      "trkx:"
-      "trky:"
-      "trkz:"
-      "timeleft:"
+      "run/I:"
+      "event/I:"
+      "trk/I:"
+      "trktime/F:"
+      "i/I:"
+      "trkstartx/F:"
+      "trkstarty/F:"
+      "trkstartz/F:"
+      "trkx/F:"
+      "trky/F:"
+      "trkz/F:"
+      "timeleft/F:"
 
-      "type:"
-      "t:"
-      "mindist:"
-      "dist2:"
-      "e:"
-      "nhit:"
-      "tdclen"
+      "type/I:"
+      "t/F:"
+      "dt/F:"
+      "mindist/F:"
+      "dist2/F:"
+      "e/F:"
+      "nhit/I:"
+      "tdclen/F"
       "\n");
   }
 

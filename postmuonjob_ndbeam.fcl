@@ -1,0 +1,52 @@
+#include "postmuon.fcl"
+#include "services.fcl"
+#include "LiveGeometry.fcl"
+#include "BackTracker.fcl"
+#include "KalmanTrack.fcl"
+#include "KalmanTrackMerge.fcl"
+
+process_name: PostMuonProcessFTW
+
+services:
+{
+  # Load the service that manages root files for histograms.
+  TFileService: { fileName: "histos.root"            }
+  scheduler:    { wantSummary: true }
+  message:      @local::standard_out
+  Calibrator:   @local::standard_calibrator
+  @table::standard_services
+}
+
+#Start each new event with an empty event.
+source:
+{
+  module_type: RootInput
+  maxEvents: -1
+}
+
+ndbeam_postmuon: @local::standard_postmuon
+ndbeam_postmuon.TracksAreDown: false
+
+# Define and configure some modules to do work on each event.
+# First modules are defined; they are scheduled later.
+# Modules are grouped by type.
+physics:
+{
+
+ producers:
+ {
+ }
+
+ analyzers:
+ {
+   postmuon:         @local::ndbeam_postmuon
+ }
+
+ reco: [ ]
+
+ stream1: [ postmuon ]
+
+ #end_path are things that do not modify art::Event, includes analyzers and output modules. 
+ #all items here can be run simultaneously
+ end_paths:     [ stream1 ]  
+}

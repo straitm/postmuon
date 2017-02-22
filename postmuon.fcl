@@ -7,9 +7,9 @@ standard_postmuon:
  RawDataLabel:    "calhit"
 
  # 20.1 is enough to catch ~99% of gammas from neutron capture according
- # to my toy MC However, it is very heavy to run that for the FD, so 4
- # is the default, which (I think) catches 99.X% of Michels.
- MaxDistInCells: 4.0
+ # to my toy MC However, it is very heavy to run that for the FD, so 6
+ # is the default, which (I think) catches 99.X% of Michels and ~70% of neutrons.
+ MaxDistInCells: 6.0
 
  # true for cosmics, i.e. assume tracks are going downwards
  # false for beam, i.e. assume tracks are going

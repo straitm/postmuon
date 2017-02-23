@@ -45,20 +45,21 @@ struct trkinfo{
   int i; // index of track in the track array
   double time;
   int lasthiti_even, lasthiti_odd;
-  bool needs_flip;
+  float sx, sy, sz, ex, ey, ez; // start and end position, after flip correction
 };
 
 struct cluster{
   int i; // which cluster for the given track
   int type; // defines the set of cuts used for this cluster
-  int first_accepted_time; // time of the first hit in the cluster
-  int last_accepted_time; // time of the last hit in the cluster
+  float first_accepted_time; // time of the first hit in the cluster
+  float last_accepted_time; // time of the last hit in the cluster
   float mindist;  // minimum hit distance from track end
   float dist2sum; // summed hit distance from track end
   float tsum;     // summed times, in ns, of a cluster of delayed hits
   float previous_cluster_t; // what it says
   float esum;     // summed calibrated energy, in MeV
   float pesum;    // summed PE
+  int   adcsum;   // summed ADC
   int nhit;       // number of hits in full delayed cluster
 };
 
@@ -71,6 +72,7 @@ static void resetcluster(cluster & res)
   res.tsum = 0;
   res.esum = 0;
   res.pesum = 0;
+  res.adcsum = 0;
   res.nhit = 0;
   res.previous_cluster_t = 0;
 }
@@ -268,7 +270,7 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
 static double hit_near_track(const trkinfo & __restrict__ tinfo,
   const rb::CellHit & __restrict__ chit)
 {
-  const int aftertime = chit.TNS();
+  const float aftertime = chit.TNS();
   if(aftertime < tinfo.time) return -1;
 
   // Accept the hit even if it is in the track!  Because if a Michel
@@ -327,13 +329,13 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
 {
   const double timeleft = einfo.triggerlength - tinfo.time;
 
-  const double tsx = tinfo.needs_flip? tinfo.trk.Stop().X(): tinfo.trk.Start().X();
-  const double tsy = tinfo.needs_flip? tinfo.trk.Stop().Y(): tinfo.trk.Start().Y();
-  const double tsz = tinfo.needs_flip? tinfo.trk.Stop().Z(): tinfo.trk.Start().Z();
+  const double tsx = tinfo.sx;
+  const double tsy = tinfo.sy;
+  const double tsz = tinfo.sz;
 
-  const double tx = tinfo.needs_flip? tinfo.trk.Start().X(): tinfo.trk.Stop().X();
-  const double ty = tinfo.needs_flip? tinfo.trk.Start().Y(): tinfo.trk.Stop().Y();
-  const double tz = tinfo.needs_flip? tinfo.trk.Start().Z(): tinfo.trk.Stop().Z();
+  const double tx = tinfo.ex;
+  const double ty = tinfo.ey;
+  const double tz = tinfo.ez;
 
   fprintf(OUT, "%d %d ", einfo.run, einfo.event);
   fprintf(OUT, "%d ", tinfo.i);
@@ -351,7 +353,10 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   else
     fprintf(OUT, "-1 ");
 
-  fprintf(OUT, "%f ", cluster.previous_cluster_t);
+  if(cluster.nhit)
+    fprintf(OUT, "%f ", float(cluster.tsum)/cluster.nhit-cluster.previous_cluster_t);
+  else
+    fprintf(OUT, "0 ");
 
   fprintf(OUT, "%.3f ", cluster.mindist);
 
@@ -360,9 +365,10 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
 
   fprintf(OUT, "%.3f ", cluster.esum);
   fprintf(OUT, "%.3f ", cluster.pesum);
+  fprintf(OUT, "%d ", cluster.adcsum);
 
   fprintf(OUT, "%d ", cluster.nhit);
-  fprintf(OUT, "%d ",
+  fprintf(OUT, "%.3f ",
           cluster.last_accepted_time - cluster.first_accepted_time);
   fprintf(OUT, "\n");
 }
@@ -440,6 +446,7 @@ static void cluster_search(const int type,
   cluster clu = mkcluster();
   clu.i = 0;
   clu.type = type;
+  clu.previous_cluster_t = tinfo.time;
 
   for(int c = first_hit_to_consider; c < (int)sorted_hits.size(); c++){
     const rb::CellHit & chit = sorted_hits[c];
@@ -456,9 +463,7 @@ static void cluster_search(const int type,
 
     const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
        // If the hit is in X, it needs a Y plane to provide W
-       chit.View() == geo::kX?
-         (tinfo.needs_flip?tinfo.trk.Start().Y():tinfo.trk.Stop().Y()):
-         (tinfo.needs_flip?tinfo.trk.Start().X():tinfo.trk.Stop().X()));
+       chit.View() == geo::kX? tinfo.ey: tinfo.ex);
 
     if(!rhit.IsCalibrated()
        ||
@@ -470,10 +475,11 @@ static void cluster_search(const int type,
       )
       continue;
 
-    // Hits are time ordered.  Only report on hits that are separated
-    // in time from other accepted hits by at least 100ns, which is 
-    // a bit longer than 1 TDC tick (1/16us).
-    const bool newcluster = chit.TNS() > clu.last_accepted_time + 100;
+    // Hits are time ordered.  Only report on hits that are separated in time
+    // from other accepted hits by at least 500ns, which is a few TDC ticks
+    // (1/16us) and about twice the gaussian resolution of fine timing for very
+    // small hits. It seems like the right amount of time by inspection.
+    const bool newcluster = chit.TNS() > clu.last_accepted_time + 500.0;
 
     if(newcluster && clu.nhit){
       print_ntuple_line(einfo, tinfo, clu);
@@ -498,6 +504,7 @@ static void cluster_search(const int type,
 
     clu.esum += rhit.GeV()*1000;
     clu.pesum += chit.PE();
+    clu.adcsum += chit.ADC();
   }
 
   // print last cluster, or track info if no cluster
@@ -519,7 +526,7 @@ void PostMuon::analyze(const art::Event& evt)
   evt.getByLabel(fRawDataLabel, cellcol);
 
   art::Handle< std::vector<rb::Track> > tracks;
-  evt.getByLabel("kalmantrackmerge", tracks);
+  evt.getByLabel("windowtrack", tracks);
 
   if(OUT == NULL){
     OUT = fopen(Form("postmuon_%d_%d.20170120.ntuple",
@@ -548,8 +555,10 @@ void PostMuon::analyze(const art::Event& evt)
       "mindist/F:"
       "dist2/F:"
       "e/F:"
+      "pe/F:"
+      "adc/I:"
       "nhit/I:"
-      "tdclen/F"
+      "ctlen/F"
       "\n");
   }
 
@@ -590,12 +599,31 @@ void PostMuon::analyze(const art::Event& evt)
     const rb::Track & trk = sorted_tracks[t];
 
     trkinfo tinfo;
+    const bool needs_flip = shall_we_flip_it(trk);
+    tinfo.sx = needs_flip? trk.Stop ().X(): trk.Start().X();
+    tinfo.sy = needs_flip? trk.Stop ().Y(): trk.Start().Y();
+    tinfo.sz = needs_flip? trk.Stop ().Z(): trk.Start().Z();
+    tinfo.ex = needs_flip? trk.Start().X(): trk.Stop ().X();
+    tinfo.ey = needs_flip? trk.Start().Y(): trk.Stop ().Y();
+    tinfo.ez = needs_flip? trk.Start().Z(): trk.Stop ().Z();
+
+    // It's a waste of time to search for clusters around tracks that almost
+    // certainly represent through-goers.  Note that this does nothing to near
+    // detector events
+    if(fabs(tinfo.ex) >  750) continue;
+    if(     tinfo.ey  < -730) continue;
+    if(     tinfo.ez  <   25) continue;
+    if(     tinfo.ez  > 5935) continue;
+
+    // Don't exclude tracks based on their starting positions, since I want this
+    // to work for both cosmics and beam
+    ;
+
+    tinfo.trk = trk;
+    tinfo.i = t;
     tinfo.lasthiti_even = 0, tinfo.lasthiti_odd = 0;
     last_hits(tinfo.lasthiti_even, tinfo.lasthiti_odd, trk);
     tinfo.time = mean_late_track_time(trk);
-    tinfo.needs_flip = shall_we_flip_it(trk);
-    tinfo.trk = trk;
-    tinfo.i = t;
 
     cluster_search(all, einfo, sorted_hits, trkhits, first_hit_to_consider, tinfo);
     cluster_search(ex,  einfo, sorted_hits, trkhits, first_hit_to_consider, tinfo);

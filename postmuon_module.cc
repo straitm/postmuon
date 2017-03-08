@@ -4,6 +4,21 @@
 /// \author  M. Strait
 ////////////////////////////////////////////////////////////////////////
 
+// This has to appear *before* the DAQDataFormats includes, or else
+// you get compiler errors that don't seem to have anything to do with
+// anything. This solution was found by pure trial and error.
+#include "art/Framework/Core/EDAnalyzer.h"
+
+#include "DAQDataFormats/RawEvent.h"
+#include "DAQDataFormats/RawTrigger.h"
+#include "DAQDataFormats/RawTriggerMask.h"
+#include "DAQDataFormats/RawDataBlock.h"
+#include "DAQDataFormats/RawMicroBlock.h"
+#include "DAQDataFormats/RawMicroSlice.h"
+#include "DAQDataFormats/RawNanoSlice.h"
+#include "DAQChannelMap/DAQChannelMap.h"
+#include "RawData/RawSumDropMB.h"
+
 #include "art/Framework/Principal/Run.h"
 #include "art/Framework/Principal/Event.h"
 #include "art/Framework/Services/Registry/ServiceHandle.h"
@@ -16,7 +31,8 @@
 #include "RecoBase/Track.h"
 #include "Calibrator/Calibrator.h"
 
-#include "Simulation/ParticleNavigator.h"
+#include "RawData/FlatDAQData.h"
+#include "RawData/DAQHeader.h"
 #include "RawData/RawTrigger.h"
 
 #include "GeometryObjects/PlaneGeo.h"
@@ -25,8 +41,6 @@
 #include <algorithm>
 
 #include <signal.h>
-
-#include "art/Framework/Core/EDAnalyzer.h"
 
 static FILE * OUT = NULL;
 static int NhitTrackTimeAveraging = 1; // dummy, to be overwritten in PostMuon()
@@ -38,6 +52,7 @@ struct evtinfo{
   int run;
   int event;
   double triggerlength;
+  double starttime;
 };
 
 struct trkinfo{
@@ -111,7 +126,10 @@ namespace PostMuon {
 }
 
 
-static double NS_PER_MICROSLICE = 500;
+static double NS_PER_TDC = 1000/64.;
+static double NS_PER_MICROSLICE = 50e3;
+static int DCMS_PER_FD = 14 * 12; // Hack.  Should look this up in case they aren't all on for a given run or event
+                                  // Also want to use ND data sometimes XXX
 
 // Geometrically about correct, but perhaps should be scaled by density or
 // radiation length or neutron cross section or something.  Or not, since
@@ -327,7 +345,11 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
                               const trkinfo & __restrict__ tinfo,
                               const cluster & __restrict__ cluster)
 {
-  const double timeleft = einfo.triggerlength - tinfo.time;
+  const double timeleft = einfo.triggerlength - tinfo.time + (NS_PER_MICROSLICE - einfo.starttime);
+
+//  if(tinfo.i == 0)
+//    printf("%f %f %f\n", einfo.triggerlength, einfo.starttime, tinfo.time);
+
 
   const double tsx = tinfo.sx;
   const double tsy = tinfo.sy;
@@ -339,6 +361,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
 
   fprintf(OUT, "%d %d ", einfo.run, einfo.event);
   fprintf(OUT, "%d ", tinfo.i);
+  fprintf(OUT, "%.1f ", einfo.triggerlength);
   fprintf(OUT, "%f ", tinfo.time);
   fprintf(OUT, "%d ", cluster.i);
   fprintf(OUT, "%.1f %.1f %.1f ", tsx, tsy, tsz);
@@ -385,6 +408,12 @@ PostMuon::PostMuon(fhicl::ParameterSet const& pset)
   NhitTrackTimeAveraging = fNhitTrackTimeAveraging;
   TracksAreDown = fTracksAreDown;
   MaxDistInCells = fMaxDistInCells;
+
+  // If I don't do this, it responds to SEGV by backgrounding itself and
+  // stopping, and upon being foregrounded, by claiming to have been
+  // aborted and going back to sleep, and upon a second foregrounding,
+  // finally actually dying. What.
+  signal(SIGSEGV, SIG_DFL);
 }
 
 void PostMuon::endJob()
@@ -406,6 +435,12 @@ static bool compare_cellhit(const rb::CellHit & __restrict__ a,
                             const rb::CellHit & __restrict__ b)
 {
   return a.TNS() < b.TNS();
+}
+
+static bool compare_cellhit_TDC(const rb::CellHit & __restrict__ a,
+                                const rb::CellHit & __restrict__ b)
+{
+  return a.TDC() < b.TDC();
 }
 
 static std::vector<rb::CellHit> make_trkhits(const std::vector<rb::Track> & trks)
@@ -516,8 +551,15 @@ PostMuon::~PostMuon() { }
 void PostMuon::analyze(const art::Event& evt)
 {
   // I'm so sorry that I have to do this.  And, my goodness, doing
-  // it in the constructor isn't sufficient.
+  // it in the constructor isn't sufficient.  If this isn't done,
+  // it responds to PIPE by going into an endless loop.
   signal(SIGPIPE, SIG_DFL);
+
+  art::Handle< std::vector<rawdata::FlatDAQData> > flatdaq;
+  evt.getByLabel("daq", flatdaq);
+
+  art::Handle<rawdata::DAQHeader> daqheader;
+  evt.getByLabel("daq", daqheader);
 
   art::Handle< std::vector<rawdata::RawTrigger> > rawtrigger;
   evt.getByLabel("daq", rawtrigger);
@@ -539,6 +581,7 @@ void PostMuon::analyze(const art::Event& evt)
       "run/I:"
       "event/I:"
       "trk/I:"
+      "triggerlength/F:"
       "trktime/F:"
       "i/I:"
       "trkstartx/F:"
@@ -560,24 +603,91 @@ void PostMuon::analyze(const art::Event& evt)
       "nhit/I:"
       "ctlen/F"
       "\n");
+    printf("DEBUG TimeStart/l:TimeStart5/I:TimeStart8/I:TDCT0/l:ExtractionStart/l:GenTime/l:FirstTNS/f:LastTNS/f:nhit/d:FirstTDC/d:LastTDC/d:tdclen/d\n");
   }
 
   if(rawtrigger->empty()) return;
 
+  daqdataformats::RawEvent raw;
+  if(flatdaq->empty()) return;
+
+  raw.readData((*flatdaq)[0].getRawBufferPointer());
+
+  if(raw.getDataBlockNumber() == 0) return;
+
+  raw.setFloatingDataBlock(0);
+  daqdataformats::RawDataBlock& datablock = (*raw.getFloatingDataBlock());
+
+  if(datablock.getHeader()->getMarker() == daqdataformats::datablockheader::SummaryBlock_Marker &&
+     datablock.getHeader()->checkMarker()) return;
+
+    for(unsigned int mi = 0; mi < datablock.getNumMicroBlocks(); mi++){
+      datablock.setFloatingMicroBlock(mi);
+      daqdataformats::RawMicroBlock * ub = datablock.getFloatingMicroBlock();
+
+      // For gosh sakes, I can't figure out if there's a nice named function
+      // that would provide this, but it is always the second word of the microslice,
+      // which follows two words of microblock header, so just get it
+      const uint32_t time_marker_low  = ((uint32_t *)(ub->getBuffer()))[3];
+      const uint32_t time_marker_high = ((uint32_t *)(ub->getBuffer()))[4];
+      printf("microblock %5d %08x %08x\n", mi, time_marker_low, time_marker_high);
+    }
+  }
+  
+  for(unsigned int i = 0; i < flatdaq->size(); i++){
+    printf("FLATDAQ %d\n", i);
+    for(unsigned int j = 0; j < (*flatdaq)[i].fRawBuffer.size(); j++){
+      const int jflip = 4*(j/4) + (3 - j%4); // fix endianness
+
+      if(j%4 == 0 ) printf("%08x  ", j);
+      printf("%02x ", (unsigned char)(*flatdaq)[i].fRawBuffer[jflip]);
+      if(j%4 == 3) printf("\n");
+    }
+    printf("\n");
+  }
+
   evtinfo einfo;
 
-  einfo.triggerlength = (*rawtrigger)[0].
-    fTriggerRange_TriggerLength*NS_PER_MICROSLICE;
+  einfo.triggerlength =
+    daqheader->TotalMicroSlices()*NS_PER_MICROSLICE/DCMS_PER_FD;
+  einfo.starttime =
+    (*rawtrigger)[0].TDCT0()*NS_PER_TDC;
+
+
   einfo.run = evt.run();
   einfo.event = evt.event();
 
+  int firsttdc = 0, lasttdc = 0;
+
   // CellHits do *not* come in time order
   std::vector<rb::CellHit> sorted_hits;
-  if(!tracks->empty()){
-    for(int c = 0; c < (int)cellcol->size(); c++)
-      sorted_hits.push_back((*cellcol)[c]);
-    std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit);
-  }
+
+  for(int c = 0; c < (int)cellcol->size(); c++)
+    sorted_hits.push_back((*cellcol)[c]);
+
+  std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit_TDC);
+
+  firsttdc = sorted_hits[0].TDC();
+  lasttdc = sorted_hits[sorted_hits.size()-1].TDC();
+
+  std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit);
+
+  printf("DEBUG %12llu %5llu %5llu %10llu %12llu %12llu %lf %lf %d %d %d %d\n",
+    (*rawtrigger)[0].fTriggerTimingMarker_TimeStart, 
+    (*rawtrigger)[0].fTriggerTimingMarker_TimeStart & 0x1fULL, 
+    (*rawtrigger)[0].fTriggerTimingMarker_TimeStart & 0xffULL, 
+    (*rawtrigger)[0].TDCT0(),
+    (*rawtrigger)[0].fTriggerTimingMarker_ExtractionStart, // always zero
+    (*rawtrigger)[0].fTriggerTime_GenTime,   // same as TimeStart
+    sorted_hits[0].TNS(),
+    sorted_hits[sorted_hits.size()-1].TNS(),
+    (int)sorted_hits.size(),
+    firsttdc,
+    lasttdc, 
+    lasttdc-firsttdc);
+  fflush(stdout);
+
+  return;
 
   std::vector<rb::Track> sorted_tracks;
   if(!tracks->empty()){

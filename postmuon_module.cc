@@ -618,39 +618,31 @@ void PostMuon::analyze(const art::Event& evt)
   raw.setFloatingDataBlock(0);
   daqdataformats::RawDataBlock& datablock = (*raw.getFloatingDataBlock());
 
+  uint64_t event_start_time = 0xffffffffffffffff;
+
   for(unsigned int di = 0; di < raw.getDataBlockNumber(); di++){
     raw.setFloatingDataBlock(di);
     datablock = (*raw.getFloatingDataBlock());
 
-    const bool nogo = datablock.getHeader()->getMarker() == daqdataformats::datablockheader::SummaryBlock_Marker ||
-       !datablock.getHeader()->checkMarker() || datablock.getNumMicroBlocks() == 0;
+    if(datablock.getHeader()->getMarker() == daqdataformats::datablockheader::SummaryBlock_Marker ||
+       !datablock.getHeader()->checkMarker()) continue;
 
-    if(!nogo) break;
+    for(unsigned int mi = 0; mi < datablock.getNumMicroBlocks(); mi++){
+      datablock.setFloatingMicroBlock(mi);
+      daqdataformats::RawMicroBlock * ub = datablock.getFloatingMicroBlock();
 
-    if(di == raw.getDataBlockNumber()-1){ puts("all data blocks are summaries or empty"); return; }
-    else continue;
+      // For gosh sakes, I can't figure out if there's a nice named function that
+      // would provide this, but it is always the second word of the microslice,
+      // which follows two words of microblock header, so just get it.
+      const uint32_t time_marker_low  = ((uint32_t *)(ub->getBuffer()))[3];
+      const uint32_t time_marker_high = ((uint32_t *)(ub->getBuffer()))[4];
+
+      uint64_t time_marker = time_marker_low;
+      time_marker |= (uint64_t)time_marker_high << 32;
+      if(time_marker < event_start_time) event_start_time = time_marker;
+    }
   }
 
-  if(datablock.getNumMicroBlocks() == 0){ puts("no micro blocks"); return; }
-
-  uint64_t event_start_time = 0xffffffffffffffff;
-
-  for(unsigned int mi = 0; mi < datablock.getNumMicroBlocks(); mi++){
-    datablock.setFloatingMicroBlock(mi);
-    daqdataformats::RawMicroBlock * ub = datablock.getFloatingMicroBlock();
-
-    // For gosh sakes, I can't figure out if there's a nice named function that
-    // would provide this, but it is always the second word of the microslice,
-    // which follows two words of microblock header, so just get it.
-    const uint32_t time_marker_low  = ((uint32_t *)(ub->getBuffer()))[3];
-    const uint32_t time_marker_high = ((uint32_t *)(ub->getBuffer()))[4];
-
-    uint64_t time_marker = 0;
-    time_marker |= (uint64_t)time_marker_low ;
-    time_marker |= (uint64_t)time_marker_high << 32;
-    if(time_marker < event_start_time) event_start_time = time_marker;
-  }
-  
   printf("beginning of event %016lx\n", event_start_time);
   printf("Trigger time       %016llx\n", (*rawtrigger)[0].fTriggerTimingMarker_TimeStart);
   printf("Delta              %ld TDC\n", ((int64_t)((*rawtrigger)[0].fTriggerTimingMarker_TimeStart - event_start_time)));

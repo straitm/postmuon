@@ -32,7 +32,6 @@
 #include "Calibrator/Calibrator.h"
 
 #include "RawData/FlatDAQData.h"
-#include "RawData/DAQHeader.h"
 #include "RawData/RawTrigger.h"
 
 #include "GeometryObjects/PlaneGeo.h"
@@ -78,10 +77,12 @@ struct cluster{
   int nhit;       // number of hits in full delayed cluster
 };
 
+const float INVALID_TIME = -1000000;
+
 static void resetcluster(cluster & res)
 {
-  res.first_accepted_time = -1000000;
-  res.last_accepted_time  = -1000000;
+  res.first_accepted_time = INVALID_TIME;
+  res.last_accepted_time  = INVALID_TIME;
   res.mindist = 1000000;
   res.dist2sum = 0;
   res.tsum = 0;
@@ -126,10 +127,8 @@ namespace PostMuon {
 }
 
 
-static double NS_PER_TDC = 1000/64.;
-static double NS_PER_MICROSLICE = 50e3;
-static int DCMS_PER_FD = 14 * 12; // Hack.  Should look this up in case they aren't all on for a given run or event
-                                  // Also want to use ND data sometimes XXX
+static int TDC_PER_US = 64;
+static int US_PER_MICROSLICE = 50; // I hope this is always true
 
 // Geometrically about correct, but perhaps should be scaled by density or
 // radiation length or neutron cross section or something.  Or not, since
@@ -345,11 +344,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
                               const trkinfo & __restrict__ tinfo,
                               const cluster & __restrict__ cluster)
 {
-  const double timeleft = einfo.triggerlength - tinfo.time + (NS_PER_MICROSLICE - einfo.starttime);
-
-//  if(tinfo.i == 0)
-//    printf("%f %f %f\n", einfo.triggerlength, einfo.starttime, tinfo.time);
-
+  const double timeleft = einfo.triggerlength - (tinfo.time - einfo.starttime);
 
   const double tsx = tinfo.sx;
   const double tsy = tinfo.sy;
@@ -361,23 +356,23 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
 
   fprintf(OUT, "%d %d ", einfo.run, einfo.event);
   fprintf(OUT, "%d ", tinfo.i);
-  fprintf(OUT, "%.1f ", einfo.triggerlength);
-  fprintf(OUT, "%f ", tinfo.time);
+  fprintf(OUT, "%.1f ", einfo.triggerlength/1000);
+  fprintf(OUT, "%f ", tinfo.time/1000);
   fprintf(OUT, "%d ", cluster.i);
   fprintf(OUT, "%.1f %.1f %.1f ", tsx, tsy, tsz);
   fprintf(OUT, "%.1f %.1f %.1f ", tx, ty, tz);
-  fprintf(OUT, "%f ", timeleft);
+  fprintf(OUT, "%f ", timeleft/1000);
 
   fprintf(OUT, "%d ", cluster.type);
 
   if(cluster.nhit)
     fprintf(OUT, "%f ",
-            float(cluster.tsum)/cluster.nhit-tinfo.time);
+            (float(cluster.tsum)/cluster.nhit-tinfo.time)/1000);
   else
     fprintf(OUT, "-1 ");
 
   if(cluster.nhit)
-    fprintf(OUT, "%f ", float(cluster.tsum)/cluster.nhit-cluster.previous_cluster_t);
+    fprintf(OUT, "%f ", (float(cluster.tsum)/cluster.nhit-cluster.previous_cluster_t)/1000);
   else
     fprintf(OUT, "0 ");
 
@@ -392,7 +387,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
 
   fprintf(OUT, "%d ", cluster.nhit);
   fprintf(OUT, "%.3f ",
-          cluster.last_accepted_time - cluster.first_accepted_time);
+          (cluster.last_accepted_time - cluster.first_accepted_time)/1000);
   fprintf(OUT, "\n");
 }
 
@@ -408,12 +403,6 @@ PostMuon::PostMuon(fhicl::ParameterSet const& pset)
   NhitTrackTimeAveraging = fNhitTrackTimeAveraging;
   TracksAreDown = fTracksAreDown;
   MaxDistInCells = fMaxDistInCells;
-
-  // If I don't do this, it responds to SEGV by backgrounding itself and
-  // stopping, and upon being foregrounded, by claiming to have been
-  // aborted and going back to sleep, and upon a second foregrounding,
-  // finally actually dying. What.
-  signal(SIGSEGV, SIG_DFL);
 }
 
 void PostMuon::endJob()
@@ -435,12 +424,6 @@ static bool compare_cellhit(const rb::CellHit & __restrict__ a,
                             const rb::CellHit & __restrict__ b)
 {
   return a.TNS() < b.TNS();
-}
-
-static bool compare_cellhit_TDC(const rb::CellHit & __restrict__ a,
-                                const rb::CellHit & __restrict__ b)
-{
-  return a.TDC() < b.TDC();
 }
 
 static std::vector<rb::CellHit> make_trkhits(const std::vector<rb::Track> & trks)
@@ -532,8 +515,8 @@ static void cluster_search(const int type,
     clu.dist2sum += dist*dist;
     if(dist < clu.mindist) clu.mindist = dist;
 
-    clu.last_accepted_time = chit.TNS();
-    if(clu.first_accepted_time < 0)
+    clu.last_accepted_time = chit.TNS(); // because they're sorted by TNS
+    if(clu.first_accepted_time == INVALID_TIME)
       clu.first_accepted_time = chit.TNS();
     clu.tsum += chit.TNS();
 
@@ -548,30 +531,71 @@ static void cluster_search(const int type,
 
 PostMuon::~PostMuon() { }
 
-void PostMuon::analyze(const art::Event& evt)
+/*
+  Get the length of the event in TDC ticks, typically 550*64, and
+  "delta_tdc", the time between the trigger time and the time the event
+  starts. You can subtract this off of the time that the offline gives
+  each hit to get the time since the beginning of the readout, and with
+  the event length, the time until the end of the readout.
+
+  delta_tdc is a signed 64 bit integer, even though it should always be a
+  small positive number, just in case.  Ditto for the event length.
+
+  Returns whether this information was successfully extracted.
+*/
+static bool delta_and_length(int64_t & event_length_tdc, int64_t & delta_tdc,
+  const art::Handle< std::vector<rawdata::FlatDAQData> > & flatdaq,
+  const art::Handle< std::vector<rawdata::RawTrigger> > & rawtrigger)
 {
-  // I'm so sorry that I have to do this.  And, my goodness, doing
-  // it in the constructor isn't sufficient.  If this isn't done,
-  // it responds to PIPE by going into an endless loop.
-  signal(SIGPIPE, SIG_DFL);
+  daqdataformats::RawEvent raw;
+  if(flatdaq->empty()){ puts("no flat daq"); return false; }
 
-  art::Handle< std::vector<rawdata::FlatDAQData> > flatdaq;
-  evt.getByLabel("daq", flatdaq);
+  raw.readData((*flatdaq)[0].getRawBufferPointer());
 
-  art::Handle<rawdata::DAQHeader> daqheader;
-  evt.getByLabel("daq", daqheader);
+  if(raw.getDataBlockNumber() == 0){ puts("no data blocks"); return false; }
 
-  art::Handle< std::vector<rawdata::RawTrigger> > rawtrigger;
-  evt.getByLabel("daq", rawtrigger);
+  raw.setFloatingDataBlock(0);
+  daqdataformats::RawDataBlock& datablock = (*raw.getFloatingDataBlock());
 
-  art::Handle< std::vector<rb::CellHit> > cellcol; // get hits
-  evt.getByLabel(fRawDataLabel, cellcol);
+  uint64_t event_start_time = 0xffffffffffffffff;
+  uint64_t event_end_time   = 0x0000000000000000;
 
-  art::Handle< std::vector<rb::Track> > tracks;
-  evt.getByLabel("windowtrack", tracks);
+  for(unsigned int di = 0; di < raw.getDataBlockNumber(); di++){
+    raw.setFloatingDataBlock(di);
+    datablock = (*raw.getFloatingDataBlock());
 
+    if(datablock.getHeader()->getMarker() == daqdataformats::datablockheader::SummaryBlock_Marker ||
+       !datablock.getHeader()->checkMarker()) continue;
+
+    for(unsigned int mi = 0; mi < datablock.getNumMicroBlocks(); mi++){
+      datablock.setFloatingMicroBlock(mi);
+      daqdataformats::RawMicroBlock * ub = datablock.getFloatingMicroBlock();
+
+      // For gosh sakes, I can't figure out if there's a nice named function that
+      // would provide this, but it is always the second word of the microslice,
+      // which follows two words of microblock header, so just get it.
+      const uint32_t time_marker_low  = ((uint32_t *)(ub->getBuffer()))[3];
+      const uint32_t time_marker_high = ((uint32_t *)(ub->getBuffer()))[4];
+
+      uint64_t time_marker = time_marker_low;
+      time_marker |= (uint64_t)time_marker_high << 32;
+      if(time_marker < event_start_time) event_start_time = time_marker;
+      if(time_marker > event_end_time  ) event_end_time   = time_marker;
+    }
+  }
+
+  delta_tdc = (int64_t)((*rawtrigger)[0].fTriggerTimingMarker_TimeStart - event_start_time);
+  
+  // Assume that microblocks are always 50us.  I hope that's true for all relevant data.
+  event_length_tdc = ((int64_t)(event_end_time - event_start_time)) + US_PER_MICROSLICE*TDC_PER_US;
+
+  return true; // ok
+}
+
+static void ntuple_header(const art::Event & evt)
+{
   if(OUT == NULL){
-    OUT = fopen(Form("postmuon_%d_%d.20170120.ntuple",
+    OUT = fopen(Form("postmuon_%d_%d.20170308.ntuple",
                      evt.run(), evt.subRun()), "w");
     if(OUT == NULL){
        fprintf(stderr, "Could not open output ntuple file\n");
@@ -603,117 +627,56 @@ void PostMuon::analyze(const art::Event& evt)
       "nhit/I:"
       "ctlen/F"
       "\n");
-    printf("DEBUG TimeStart/l:TimeStart5/I:TimeStart8/I:TDCT0/l:ExtractionStart/l:GenTime/l:FirstTNS/f:LastTNS/f:nhit/d:FirstTDC/d:LastTDC/d:tdclen/d\n");
   }
+}
+
+void PostMuon::analyze(const art::Event& evt)
+{
+  // I'm so sorry that I have to do this.  And, my goodness, doing
+  // it in the constructor isn't sufficient.  If this isn't done,
+  // it responds to PIPE by going into an endless loop.
+  signal(SIGPIPE, SIG_DFL);
+
+  art::Handle< std::vector<rawdata::FlatDAQData> > flatdaq;
+  evt.getByLabel("daq", flatdaq);
+
+  art::Handle< std::vector<rawdata::RawTrigger> > rawtrigger;
+  evt.getByLabel("daq", rawtrigger);
+
+  art::Handle< std::vector<rb::CellHit> > cellcol; // get hits
+  evt.getByLabel(fRawDataLabel, cellcol);
+
+  art::Handle< std::vector<rb::Track> > tracks;
+  evt.getByLabel("windowtrack", tracks);
+
+  ntuple_header(evt);
 
   if(rawtrigger->empty()){ puts("no raw trigger"); return; }
 
-  daqdataformats::RawEvent raw;
-  if(flatdaq->empty()){ puts("no flat daq"); return; }
+  if(tracks->empty()) return;
 
-  raw.readData((*flatdaq)[0].getRawBufferPointer());
-
-  if(raw.getDataBlockNumber() == 0){ puts("no data blocks"); return; }
-
-  raw.setFloatingDataBlock(0);
-  daqdataformats::RawDataBlock& datablock = (*raw.getFloatingDataBlock());
-
-  uint64_t event_start_time = 0xffffffffffffffff;
-
-  for(unsigned int di = 0; di < raw.getDataBlockNumber(); di++){
-    raw.setFloatingDataBlock(di);
-    datablock = (*raw.getFloatingDataBlock());
-
-    if(datablock.getHeader()->getMarker() == daqdataformats::datablockheader::SummaryBlock_Marker ||
-       !datablock.getHeader()->checkMarker()) continue;
-
-    for(unsigned int mi = 0; mi < datablock.getNumMicroBlocks(); mi++){
-      datablock.setFloatingMicroBlock(mi);
-      daqdataformats::RawMicroBlock * ub = datablock.getFloatingMicroBlock();
-
-      // For gosh sakes, I can't figure out if there's a nice named function that
-      // would provide this, but it is always the second word of the microslice,
-      // which follows two words of microblock header, so just get it.
-      const uint32_t time_marker_low  = ((uint32_t *)(ub->getBuffer()))[3];
-      const uint32_t time_marker_high = ((uint32_t *)(ub->getBuffer()))[4];
-
-      uint64_t time_marker = time_marker_low;
-      time_marker |= (uint64_t)time_marker_high << 32;
-      if(time_marker < event_start_time) event_start_time = time_marker;
-    }
-  }
-
-  printf("beginning of event %016lx\n", event_start_time);
-  printf("Trigger time       %016llx\n", (*rawtrigger)[0].fTriggerTimingMarker_TimeStart);
-  printf("Delta              %ld TDC\n", ((int64_t)((*rawtrigger)[0].fTriggerTimingMarker_TimeStart - event_start_time)));
-
-  /*
-  for(unsigned int i = 0; i < flatdaq->size(); i++){
-    printf("FLATDAQ %d\n", i);
-    for(unsigned int j = 0; j < (*flatdaq)[i].fRawBuffer.size(); j++){
-      const int jflip = 4*(j/4) + (3 - j%4); // fix endianness
-
-      if(j%4 == 0 ) printf("%08x  ", j);
-      printf("%02x ", (unsigned char)(*flatdaq)[i].fRawBuffer[jflip]);
-      if(j%4 == 3) printf("\n");
-    }
-    printf("\n");
-  } */
+  int64_t event_length_tdc = 0, delta_tdc = 0;
+  if(!delta_and_length(event_length_tdc, delta_tdc, flatdaq, rawtrigger)) return;
 
   evtinfo einfo;
-
-  einfo.triggerlength =
-    daqheader->TotalMicroSlices()*NS_PER_MICROSLICE/DCMS_PER_FD;
-  einfo.starttime =
-    (*rawtrigger)[0].TDCT0()*NS_PER_TDC;
-
-
+  einfo.triggerlength = event_length_tdc * 1000. / TDC_PER_US;
+  einfo.starttime = -(delta_tdc * 1000. / TDC_PER_US);
   einfo.run = evt.run();
   einfo.event = evt.event();
 
-  int firsttdc = 0, lasttdc = 0;
-
   // CellHits do *not* come in time order
   std::vector<rb::CellHit> sorted_hits;
-
   for(int c = 0; c < (int)cellcol->size(); c++)
     sorted_hits.push_back((*cellcol)[c]);
-
-  std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit_TDC);
-
-  firsttdc = sorted_hits[0].TDC();
-  lasttdc = sorted_hits[sorted_hits.size()-1].TDC();
-
   std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit);
 
-  printf("DEBUG %12llu %5llu %5llu %10llu %12llu %12llu %lf %lf %d %d %d %d\n",
-    (*rawtrigger)[0].fTriggerTimingMarker_TimeStart, 
-    (*rawtrigger)[0].fTriggerTimingMarker_TimeStart & 0x1fULL, 
-    (*rawtrigger)[0].fTriggerTimingMarker_TimeStart & 0xffULL, 
-    (*rawtrigger)[0].TDCT0(),
-    (*rawtrigger)[0].fTriggerTimingMarker_ExtractionStart, // always zero
-    (*rawtrigger)[0].fTriggerTime_GenTime,   // same as TimeStart
-    sorted_hits[0].TNS(),
-    sorted_hits[sorted_hits.size()-1].TNS(),
-    (int)sorted_hits.size(),
-    firsttdc,
-    lasttdc, 
-    lasttdc-firsttdc);
-  fflush(stdout);
-
-  return;
-
   std::vector<rb::Track> sorted_tracks;
-  if(!tracks->empty()){
-    for(int c = 0; c < (int)tracks->size(); c++){
-      // Badly tracked tracks are not useful
-      if((*tracks)[c].Stop().X() == 0 ||
-         (*tracks)[c].Stop().Y() == 0) continue;
-
-      sorted_tracks.push_back((*tracks)[c]);
-    }
-    std::sort(sorted_tracks.begin(), sorted_tracks.end(), compare_track);
+  for(int c = 0; c < (int)tracks->size(); c++){
+    // Badly tracked tracks are not useful
+    if((*tracks)[c].Stop().X() == 0 || (*tracks)[c].Stop().Y() == 0) continue;
+    sorted_tracks.push_back((*tracks)[c]);
   }
+  std::sort(sorted_tracks.begin(), sorted_tracks.end(), compare_track);
 
   std::vector<rb::CellHit> trkhits = make_trkhits(sorted_tracks);
 
@@ -732,7 +695,7 @@ void PostMuon::analyze(const art::Event& evt)
     tinfo.ez = needs_flip? trk.Start().Z(): trk.Stop ().Z();
 
     // It's a waste of time to search for clusters around tracks that almost
-    // certainly represent through-goers.  Note that this does nothing to near
+    // certainly represent exiters.  Note that this does almost nothing to near
     // detector events
     if(fabs(tinfo.ex) >  750) continue;
     if(     tinfo.ey  < -730) continue;

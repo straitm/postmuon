@@ -606,34 +606,56 @@ void PostMuon::analyze(const art::Event& evt)
     printf("DEBUG TimeStart/l:TimeStart5/I:TimeStart8/I:TDCT0/l:ExtractionStart/l:GenTime/l:FirstTNS/f:LastTNS/f:nhit/d:FirstTDC/d:LastTDC/d:tdclen/d\n");
   }
 
-  if(rawtrigger->empty()) return;
+  if(rawtrigger->empty()){ puts("no raw trigger"); return; }
 
   daqdataformats::RawEvent raw;
-  if(flatdaq->empty()) return;
+  if(flatdaq->empty()){ puts("no flat daq"); return; }
 
   raw.readData((*flatdaq)[0].getRawBufferPointer());
 
-  if(raw.getDataBlockNumber() == 0) return;
+  if(raw.getDataBlockNumber() == 0){ puts("no data blocks"); return; }
 
   raw.setFloatingDataBlock(0);
   daqdataformats::RawDataBlock& datablock = (*raw.getFloatingDataBlock());
 
-  if(datablock.getHeader()->getMarker() == daqdataformats::datablockheader::SummaryBlock_Marker &&
-     datablock.getHeader()->checkMarker()) return;
+  for(unsigned int di = 0; di < raw.getDataBlockNumber(); di++){
+    raw.setFloatingDataBlock(di);
+    datablock = (*raw.getFloatingDataBlock());
 
-    for(unsigned int mi = 0; mi < datablock.getNumMicroBlocks(); mi++){
-      datablock.setFloatingMicroBlock(mi);
-      daqdataformats::RawMicroBlock * ub = datablock.getFloatingMicroBlock();
+    const bool nogo = datablock.getHeader()->getMarker() == daqdataformats::datablockheader::SummaryBlock_Marker ||
+       !datablock.getHeader()->checkMarker() || datablock.getNumMicroBlocks() == 0;
 
-      // For gosh sakes, I can't figure out if there's a nice named function
-      // that would provide this, but it is always the second word of the microslice,
-      // which follows two words of microblock header, so just get it
-      const uint32_t time_marker_low  = ((uint32_t *)(ub->getBuffer()))[3];
-      const uint32_t time_marker_high = ((uint32_t *)(ub->getBuffer()))[4];
-      printf("microblock %5d %08x %08x\n", mi, time_marker_low, time_marker_high);
-    }
+    if(!nogo) break;
+
+    if(di == raw.getDataBlockNumber()-1){ puts("all data blocks are summaries or empty"); return; }
+    else continue;
+  }
+
+  if(datablock.getNumMicroBlocks() == 0){ puts("no micro blocks"); return; }
+
+  uint64_t event_start_time = 0xffffffffffffffff;
+
+  for(unsigned int mi = 0; mi < datablock.getNumMicroBlocks(); mi++){
+    datablock.setFloatingMicroBlock(mi);
+    daqdataformats::RawMicroBlock * ub = datablock.getFloatingMicroBlock();
+
+    // For gosh sakes, I can't figure out if there's a nice named function that
+    // would provide this, but it is always the second word of the microslice,
+    // which follows two words of microblock header, so just get it.
+    const uint32_t time_marker_low  = ((uint32_t *)(ub->getBuffer()))[3];
+    const uint32_t time_marker_high = ((uint32_t *)(ub->getBuffer()))[4];
+
+    uint64_t time_marker = 0;
+    time_marker |= (uint64_t)time_marker_low ;
+    time_marker |= (uint64_t)time_marker_high << 32;
+    if(time_marker < event_start_time) event_start_time = time_marker;
   }
   
+  printf("beginning of event %016lx\n", event_start_time);
+  printf("Trigger time       %016llx\n", (*rawtrigger)[0].fTriggerTimingMarker_TimeStart);
+  printf("Delta              %ld TDC\n", ((int64_t)((*rawtrigger)[0].fTriggerTimingMarker_TimeStart - event_start_time)));
+
+  /*
   for(unsigned int i = 0; i < flatdaq->size(); i++){
     printf("FLATDAQ %d\n", i);
     for(unsigned int j = 0; j < (*flatdaq)[i].fRawBuffer.size(); j++){
@@ -644,7 +666,7 @@ void PostMuon::analyze(const art::Event& evt)
       if(j%4 == 3) printf("\n");
     }
     printf("\n");
-  }
+  } */
 
   evtinfo einfo;
 

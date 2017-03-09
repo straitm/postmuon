@@ -538,24 +538,24 @@ PostMuon::~PostMuon() { }
   each hit to get the time since the beginning of the readout, and with
   the event length, the time until the end of the readout.
 
-  delta_tdc is a signed 64 bit integer, even though it should always be a
-  small positive number, just in case.  Ditto for the event length.
+  delta_tdc is a signed 64 bit integer, even though it should always be
+  a small positive number, just in case. Ditto for the event length.
 
   Returns whether this information was successfully extracted.
 */
-static bool delta_and_length(int64_t & event_length_tdc, int64_t & delta_tdc,
+static bool delta_and_length(int64_t & event_length_tdc,
+  int64_t & delta_tdc,
   const art::Handle< std::vector<rawdata::FlatDAQData> > & flatdaq,
   const art::Handle< std::vector<rawdata::RawTrigger> > & rawtrigger)
 {
   daqdataformats::RawEvent raw;
-  if(flatdaq->empty()){ puts("no flat daq"); return false; }
+  if(flatdaq->empty()) return false;
 
   raw.readData((*flatdaq)[0].getRawBufferPointer());
-
-  if(raw.getDataBlockNumber() == 0){ puts("no data blocks"); return false; }
+  if(raw.getDataBlockNumber() == 0) return false;
 
   raw.setFloatingDataBlock(0);
-  daqdataformats::RawDataBlock& datablock = (*raw.getFloatingDataBlock());
+  daqdataformats::RawDataBlock& datablock = *raw.getFloatingDataBlock();
 
   uint64_t event_start_time = 0xffffffffffffffff;
   uint64_t event_end_time   = 0x0000000000000000;
@@ -564,31 +564,35 @@ static bool delta_and_length(int64_t & event_length_tdc, int64_t & delta_tdc,
     raw.setFloatingDataBlock(di);
     datablock = (*raw.getFloatingDataBlock());
 
-    if(datablock.getHeader()->getMarker() == daqdataformats::datablockheader::SummaryBlock_Marker ||
+    if(datablock.getHeader()->getMarker() ==
+         daqdataformats::datablockheader::SummaryBlock_Marker ||
        !datablock.getHeader()->checkMarker()) continue;
 
     for(unsigned int mi = 0; mi < datablock.getNumMicroBlocks(); mi++){
       datablock.setFloatingMicroBlock(mi);
       daqdataformats::RawMicroBlock * ub = datablock.getFloatingMicroBlock();
 
-      // For gosh sakes, I can't figure out if there's a nice named function that
-      // would provide this, but it is always the second word of the microslice,
-      // which follows two words of microblock header, so just get it.
-      const uint32_t time_marker_low  = ((uint32_t *)(ub->getBuffer()))[3];
-      const uint32_t time_marker_high = ((uint32_t *)(ub->getBuffer()))[4];
+      // The time is always in the second and third words of the
+      // microslice, which follows two words of microblock header, so
+      // just get it. Justin says you can also get it from getTime(),
+      // but this already works and I'm not touching it.
+      const uint32_t t_marker_low  = ((uint32_t *)(ub->getBuffer()))[3];
+      const uint32_t t_marker_high = ((uint32_t *)(ub->getBuffer()))[4];
 
-      uint64_t time_marker = time_marker_low;
-      time_marker |= (uint64_t)time_marker_high << 32;
+      uint64_t time_marker = t_marker_low;
+      time_marker |= (uint64_t)t_marker_high << 32;
       if(time_marker < event_start_time) event_start_time = time_marker;
       if(time_marker > event_end_time  ) event_end_time   = time_marker;
     }
   }
 
-  delta_tdc = (int64_t)((*rawtrigger)[0].fTriggerTimingMarker_TimeStart - event_start_time);
+  delta_tdc = (int64_t)((*rawtrigger)[0].fTriggerTimingMarker_TimeStart
+                        - event_start_time);
   
-  // Assume that microblocks are always 50us.  I hope that's true for all relevant data.
-  event_length_tdc = ((int64_t)(event_end_time - event_start_time)) + US_PER_MICROSLICE*TDC_PER_US;
-
+  // Assume that microblocks are always 50us. I hope that's true for all
+  // relevant data.
+  event_length_tdc = ((int64_t)(event_end_time - event_start_time))
+                     + US_PER_MICROSLICE*TDC_PER_US;
   return true; // ok
 }
 

@@ -25,6 +25,10 @@
 #include "art/Framework/Principal/Handle.h"
 #include "fhiclcpp/ParameterSet.h"
 #include "art/Framework/Core/ModuleMacros.h"
+#include "art/Framework/Core/FindManyP.h"
+#include "art/Framework/Core/FindOneP.h"
+#include "Utilities/AssociationUtil.h"
+
 
 #include "RecoBase/CellHit.h"
 #include "RecoBase/RecoHit.h"
@@ -33,6 +37,9 @@
 
 #include "RawData/FlatDAQData.h"
 #include "RawData/RawTrigger.h"
+
+#include "ReMId/ReMId.h"
+#include "ReMId/classes.h"
 
 #include "GeometryObjects/PlaneGeo.h"
 
@@ -57,9 +64,11 @@ struct evtinfo{
 struct trkinfo{
   rb::Track trk;
   int i; // index of track in the track array
+  int ntrk; // total number of tracks in this event
   double time;
   int lasthiti_even, lasthiti_odd;
   float sx, sy, sz, ex, ey, ez; // start and end position, after flip correction
+  double remid;
 };
 
 struct cluster{
@@ -356,12 +365,14 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
 
   fprintf(OUT, "%d %d ", einfo.run, einfo.event);
   fprintf(OUT, "%d ", tinfo.i);
+  fprintf(OUT, "%d ", tinfo.ntrk);
   fprintf(OUT, "%.1f ", einfo.triggerlength/1000);
   fprintf(OUT, "%f ", tinfo.time/1000);
   fprintf(OUT, "%d ", cluster.i);
   fprintf(OUT, "%.1f %.1f %.1f ", tsx, tsy, tsz);
   fprintf(OUT, "%.1f %.1f %.1f ", tx, ty, tz);
   fprintf(OUT, "%f ", timeleft/1000);
+  fprintf(OUT, "%f ", tinfo.remid);
 
   fprintf(OUT, "%d ", cluster.type);
 
@@ -411,10 +422,10 @@ void PostMuon::endJob()
 }
 
 // Compare tracks by their time
-static bool compare_track(const rb::Track & __restrict__ a,
-                          const rb::Track & __restrict__ b)
+static bool compare_track(const trkinfo & __restrict__ a,
+                          const trkinfo & __restrict__ b)
 {
-  return mean_late_track_time(a) < mean_late_track_time(b);
+  return mean_late_track_time(a.trk) < mean_late_track_time(b.trk);
 }
 
 // Compare cellhits by their time.  Note that CellHit has the operator<
@@ -426,12 +437,12 @@ static bool compare_cellhit(const rb::CellHit & __restrict__ a,
   return a.TNS() < b.TNS();
 }
 
-static std::vector<rb::CellHit> make_trkhits(const std::vector<rb::Track> & trks)
+static std::vector<rb::CellHit> make_trkhits(const std::vector<trkinfo> & trks)
 {
   std::vector<rb::CellHit> answer;
   for(unsigned int i = 0; i < trks.size(); i++)
-    for(unsigned int j = 0; j < trks[i].NCell(); j++)
-      answer.push_back(*(trks[i].Cell(j)));
+    for(unsigned int j = 0; j < trks[i].trk.NCell(); j++)
+      answer.push_back(*(trks[i].trk.Cell(j)));
   return answer;
 }
 
@@ -609,6 +620,7 @@ static void ntuple_header(const art::Event & evt)
       "run/I:"
       "event/I:"
       "trk/I:"
+      "ntrk/I:"
       "triggerlength/F:"
       "trktime/F:"
       "i/I:"
@@ -619,6 +631,7 @@ static void ntuple_header(const art::Event & evt)
       "trky/F:"
       "trkz/F:"
       "timeleft/F:"
+      "remid/F:"
 
       "type/I:"
       "t/F:"
@@ -641,6 +654,9 @@ void PostMuon::analyze(const art::Event& evt)
   // it responds to PIPE by going into an endless loop.
   signal(SIGPIPE, SIG_DFL);
 
+  //art::Handle< art::Assns<remid::ReMId,rb::Track,void> > remids;
+  //evt.getByLabel("remid", remids);
+
   art::Handle< std::vector<rawdata::FlatDAQData> > flatdaq;
   evt.getByLabel("daq", flatdaq);
 
@@ -650,8 +666,14 @@ void PostMuon::analyze(const art::Event& evt)
   art::Handle< std::vector<rb::CellHit> > cellcol; // get hits
   evt.getByLabel(fRawDataLabel, cellcol);
 
+
   art::Handle< std::vector<rb::Track> > tracks;
-  evt.getByLabel("windowtrack", tracks);
+  evt.getByLabel("kalmantrackmerge", tracks);
+
+  // works better for cosmics (bizzarely), but has no remid
+  //evt.getByLabel("windowtrack", tracks);
+
+  art::FindOneP<remid::ReMId> remidtrack(tracks, evt, "remid");
 
   ntuple_header(evt);
 
@@ -674,11 +696,16 @@ void PostMuon::analyze(const art::Event& evt)
     sorted_hits.push_back((*cellcol)[c]);
   std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit);
 
-  std::vector<rb::Track> sorted_tracks;
+  std::vector<trkinfo> sorted_tracks;
   for(int c = 0; c < (int)tracks->size(); c++){
     // Badly tracked tracks are not useful
     if((*tracks)[c].Stop().X() == 0 || (*tracks)[c].Stop().Y() == 0) continue;
-    sorted_tracks.push_back((*tracks)[c]);
+
+    trkinfo t;
+    t.trk = (*tracks)[c];
+    t.remid = remidtrack.at(c)->Value();
+
+    sorted_tracks.push_back(t);
   }
   std::sort(sorted_tracks.begin(), sorted_tracks.end(), compare_track);
 
@@ -687,9 +714,9 @@ void PostMuon::analyze(const art::Event& evt)
   int first_hit_to_consider = 0;
 
   for(unsigned int t = 0; t < sorted_tracks.size(); t++){
-    const rb::Track & trk = sorted_tracks[t];
+    trkinfo & tinfo = sorted_tracks[t];
+    rb::Track & trk = tinfo.trk;
 
-    trkinfo tinfo;
     const bool needs_flip = shall_we_flip_it(trk);
     tinfo.sx = needs_flip? trk.Stop ().X(): trk.Start().X();
     tinfo.sy = needs_flip? trk.Stop ().Y(): trk.Start().Y();
@@ -712,6 +739,8 @@ void PostMuon::analyze(const art::Event& evt)
 
     tinfo.trk = trk;
     tinfo.i = t;
+    tinfo.ntrk = sorted_tracks.size();
+    tinfo.remid = sorted_tracks[t].remid;
     tinfo.lasthiti_even = 0, tinfo.lasthiti_odd = 0;
     last_hits(tinfo.lasthiti_even, tinfo.lasthiti_odd, trk);
     tinfo.time = mean_late_track_time(trk);

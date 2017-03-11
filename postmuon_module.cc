@@ -289,24 +289,23 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
 }
 
 /*
-  If the hit is near the track and after it in time, return the distance
-  in cells.  Otherwise, return -1 if the hit preceeds the track, or -2
-  if it is too far away.
+  If the hit is near the track, return the distance in cells. Otherwise,
+  return a negative number if it is too far away.
 */
 static double hit_near_track(const trkinfo & __restrict__ tinfo,
   const rb::CellHit & __restrict__ chit)
 {
-  const float aftertime = chit.TNS();
-  if(aftertime < tinfo.time) return -1;
-
   // Accept the hit even if it is in the track!  Because if a Michel
   // hit gets swept up into the track, this is the only way to see it.
-  //if(hit_is_in_track(chit, trk)) return -1;
+  // We might exclude it later, but not here.
+  //
+  // Accept the hit even if it is before the track!  Because this gets
+  // us the background level in an unbiased way.
 
   const double dist = dist_trackend_to_cell(tinfo.trk, chit, tinfo.lasthiti_even,
                                             tinfo.lasthiti_odd);
 
-  if(dist > MaxDistInCells) return -2;
+  if(dist > MaxDistInCells) return -1;
 
   return dist;
 }
@@ -354,6 +353,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
                               const cluster & __restrict__ cluster)
 {
   const double timeleft = einfo.triggerlength - (tinfo.time - einfo.starttime);
+  const double timeback =                        tinfo.time - einfo.starttime;
 
   const double tsx = tinfo.sx;
   const double tsy = tinfo.sy;
@@ -372,6 +372,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%.1f %.1f %.1f ", tsx, tsy, tsz);
   fprintf(OUT, "%.1f %.1f %.1f ", tx, ty, tz);
   fprintf(OUT, "%f ", timeleft/1000);
+  fprintf(OUT, "%f ", timeback/1000);
   fprintf(OUT, "%f ", tinfo.remid);
 
   fprintf(OUT, "%d ", cluster.type);
@@ -468,7 +469,7 @@ static void cluster_search(const int type,
   const evtinfo & __restrict__ einfo,
   const std::vector<rb::CellHit> & __restrict__ sorted_hits,
   const std::vector<rb::CellHit> & __restrict__ trkhits,
-  int & first_hit_to_consider, const trkinfo & __restrict__ tinfo)
+  const trkinfo & __restrict__ tinfo)
 {
   art::ServiceHandle<calib::Calibrator> calthing;
 
@@ -477,18 +478,12 @@ static void cluster_search(const int type,
   clu.type = type;
   clu.previous_cluster_t = tinfo.time;
 
-  for(int c = first_hit_to_consider; c < (int)sorted_hits.size(); c++){
+  for(int c = 0; c < (int)sorted_hits.size(); c++){
     const rb::CellHit & chit = sorted_hits[c];
 
     const double dist = hit_near_track(tinfo, chit);
 
-    if(dist < 0){
-      // This hit is before this track, so it will also be next time we look
-      // and for all further tracks. ~5% speed bump from this optimization.
-      if(dist == -1) first_hit_to_consider = c+1;
-
-      continue;
-    }
+    if(dist < 0) continue;
 
     const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
        // If the hit is in X, it needs a Y plane to provide W
@@ -631,6 +626,7 @@ static void ntuple_header(const art::Event & evt)
       "trky/F:"
       "trkz/F:"
       "timeleft/F:"
+      "timeback/F:"
       "remid/F:"
 
       "type/I:"
@@ -653,9 +649,6 @@ void PostMuon::analyze(const art::Event& evt)
   // it in the constructor isn't sufficient.  If this isn't done,
   // it responds to PIPE by going into an endless loop.
   signal(SIGPIPE, SIG_DFL);
-
-  //art::Handle< art::Assns<remid::ReMId,rb::Track,void> > remids;
-  //evt.getByLabel("remid", remids);
 
   art::Handle< std::vector<rawdata::FlatDAQData> > flatdaq;
   evt.getByLabel("daq", flatdaq);
@@ -703,15 +696,13 @@ void PostMuon::analyze(const art::Event& evt)
 
     trkinfo t;
     t.trk = (*tracks)[c];
-    t.remid = remidtrack.at(c)->Value();
+    t.remid = remidtrack.isValid()? remidtrack.at(c)->Value(): 0;
 
     sorted_tracks.push_back(t);
   }
   std::sort(sorted_tracks.begin(), sorted_tracks.end(), compare_track);
 
   std::vector<rb::CellHit> trkhits = make_trkhits(sorted_tracks);
-
-  int first_hit_to_consider = 0;
 
   for(unsigned int t = 0; t < sorted_tracks.size(); t++){
     trkinfo & tinfo = sorted_tracks[t];
@@ -745,10 +736,10 @@ void PostMuon::analyze(const art::Event& evt)
     last_hits(tinfo.lasthiti_even, tinfo.lasthiti_odd, trk);
     tinfo.time = mean_late_track_time(trk);
 
-    cluster_search(all, einfo, sorted_hits, trkhits, first_hit_to_consider, tinfo);
-    cluster_search(ex,  einfo, sorted_hits, trkhits, first_hit_to_consider, tinfo);
-    cluster_search(ex2, einfo, sorted_hits, trkhits, first_hit_to_consider, tinfo);
-    cluster_search(xt,  einfo, sorted_hits, trkhits, first_hit_to_consider, tinfo);
+    cluster_search(all, einfo, sorted_hits, trkhits, tinfo);
+    cluster_search(ex,  einfo, sorted_hits, trkhits, tinfo);
+    cluster_search(ex2, einfo, sorted_hits, trkhits, tinfo);
+    cluster_search(xt,  einfo, sorted_hits, trkhits, tinfo);
   }
 }
 

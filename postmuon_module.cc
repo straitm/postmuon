@@ -84,6 +84,8 @@ struct cluster{
   float pesum;    // summed PE
   int   adcsum;   // summed ADC
   int nhit;       // number of hits in full delayed cluster
+  int nhitx;      // number of x hits in full delayed cluster
+  int nhity;      // number of y hits in full delayed cluster
 };
 
 const float INVALID_TIME = -1000000;
@@ -99,6 +101,8 @@ static void resetcluster(cluster & res)
   res.pesum = 0;
   res.adcsum = 0;
   res.nhit = 0;
+  res.nhitx = 0;
+  res.nhity = 0;
   res.previous_cluster_t = 0;
 }
 
@@ -364,6 +368,9 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   const double tz = tinfo.ez;
 
   fprintf(OUT, "%d %d ", einfo.run, einfo.event);
+  fprintf(OUT, "%f ", sqrt(pow(tinfo.sx - tinfo.ex, 2)
+                         + pow(tinfo.sy - tinfo.ey, 2)
+                         + pow(tinfo.sz - tinfo.ez, 2)));
   fprintf(OUT, "%d ", tinfo.i);
   fprintf(OUT, "%d ", tinfo.ntrk);
   fprintf(OUT, "%.1f ", einfo.triggerlength/1000);
@@ -397,7 +404,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%.3f ", cluster.pesum);
   fprintf(OUT, "%d ", cluster.adcsum);
 
-  fprintf(OUT, "%d ", cluster.nhit);
+  fprintf(OUT, "%d %d %d ", cluster.nhit, cluster.nhitx, cluster.nhity);
   fprintf(OUT, "%.3f ",
           (cluster.last_accepted_time - cluster.first_accepted_time)/1000);
   fprintf(OUT, "\n");
@@ -517,6 +524,8 @@ static void cluster_search(const int type,
     // previous cluster (or no-op).
 
     clu.nhit++;
+    if(chit.View() == geo::kX) clu.nhitx++;
+    else                       clu.nhity++;
 
     clu.dist2sum += dist*dist;
     if(dist < clu.mindist) clu.mindist = dist;
@@ -614,6 +623,7 @@ static void ntuple_header(const art::Event & evt)
     fprintf(OUT,
       "run/I:"
       "event/I:"
+      "trklen/F:"
       "trk/I:"
       "ntrk/I:"
       "triggerlength/F:"
@@ -638,6 +648,8 @@ static void ntuple_header(const art::Event & evt)
       "pe/F:"
       "adc/I:"
       "nhit/I:"
+      "nhitx/I:"
+      "nhity/I:"
       "ctlen/F"
       "\n");
   }

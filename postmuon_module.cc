@@ -678,7 +678,7 @@ void PostMuon::analyze(const art::Event& evt)
   // works better for cosmics (bizzarely), but has no remid
   //evt.getByLabel("windowtrack", tracks);
 
-  art::FindOneP<remid::ReMId> remidtrack(tracks, evt, "remid");
+  art::FindOneP<remid::ReMId> track2remid(tracks, evt, "remid");
 
   ntuple_header(evt);
 
@@ -708,7 +708,7 @@ void PostMuon::analyze(const art::Event& evt)
 
     trkinfo t;
     t.trk = (*tracks)[c];
-    t.remid = remidtrack.isValid()? remidtrack.at(c)->Value(): 0;
+    t.remid = track2remid.isValid()? track2remid.at(c)->Value(): 0;
 
     sorted_tracks.push_back(t);
   }

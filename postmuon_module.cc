@@ -35,6 +35,8 @@
 #include "RecoBase/Track.h"
 #include "Calibrator/Calibrator.h"
 
+#include "NumuEnergy/NumuE.h"
+
 #include "RawData/FlatDAQData.h"
 #include "RawData/RawTrigger.h"
 
@@ -65,6 +67,9 @@ struct trkinfo{
   rb::Track trk;
   int i; // index of track in the track array
   int ntrk; // total number of tracks in this event
+  int slice; // the index of the slice for this track
+  float slice_energy; // Energy of the slice holding this track
+  bool primary_in_slice; // Is this the longest track in the slice?
   double time;
   int lasthiti_even, lasthiti_odd;
   float sx, sy, sz, ex, ey, ez; // start and end position, after flip correction
@@ -254,7 +259,7 @@ static bool shall_we_flip_it(const rb::Track & trk)
 }
 
 /*
- Returns true if the track goes in the +z direction, after we 
+ Returns true if the track goes in the +z direction, after we
  correct the direction to be downward-going or forward-going.
 */
 static bool is_increasing_z(const rb::Track & trk)
@@ -381,6 +386,8 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%f ", timeleft/1000);
   fprintf(OUT, "%f ", timeback/1000);
   fprintf(OUT, "%f ", tinfo.remid);
+  fprintf(OUT, "%d ", tinfo.primary_in_slice);
+  fprintf(OUT, "%f ", tinfo.slice_energy);
 
   fprintf(OUT, "%d ", cluster.type);
 
@@ -603,7 +610,7 @@ static bool delta_and_length(int64_t & event_length_tdc,
 
   delta_tdc = (int64_t)((*rawtrigger)[0].fTriggerTimingMarker_TimeStart
                         - event_start_time);
-  
+
   // Assume that microblocks are always 50us. I hope that's true for all
   // relevant data.
   event_length_tdc = ((int64_t)(event_end_time - event_start_time))
@@ -638,6 +645,8 @@ static void ntuple_header(const art::Event & evt)
       "timeleft/F:"
       "timeback/F:"
       "remid/F:"
+      "primary/I:"
+      "slce/F:"
 
       "type/I:"
       "t/F:"
@@ -655,6 +664,51 @@ static void ntuple_header(const art::Event & evt)
   }
 }
 
+// return the index in the slice array that the given track is in
+static int which_slice_is_this_track_in(
+  const trkinfo & t,
+  const art::Handle< std::vector<rb::Cluster> > & slice)
+{
+  // I'm sure this is not the best way, but I have had it with trying to
+  // figure out what the best way is, and I'm just going to do it *some*
+  // way.
+  const art::Ptr<rb::CellHit> ahit = t.trk.Cell(0); // some random hit on the track
+
+  // Could probably skip slice 0 since it is the noise slice, but let's not
+  // in case that convention changes.
+  for(unsigned int i = 0; i < slice->size(); i++){
+    const rb::Cluster & slc = (*slice)[i];
+    for(unsigned int j = 0; j < slc.NCell(); j++){
+      const art::Ptr<rb::CellHit> shit = slc.Cell(j);
+      if(*ahit == *shit) return i;
+    }
+  }
+  return -1;
+}
+
+// Fill in for each track whether it is the one with the highest remid
+// in the slice
+static void fill_primary_track_info(std::vector<trkinfo> & ts, const int nslc)
+{
+  // For each slice...
+  for(int i = 0; i < nslc; i++){
+    double maxremid = -1e40;
+    unsigned int best = 0;
+    // ... find the best track
+    for(unsigned int j = 0; j < ts.size(); j++){
+      if(ts[j].slice == i && ts[j].remid > maxremid){
+        maxremid = ts[j].remid;
+        best = j;
+      }
+    }
+
+    // ... and label it as such and the rest as not such
+    for(unsigned int j = 0; j < ts.size(); j++)
+      if(ts[j].slice == i)
+        ts[j].primary_in_slice = best == j;
+  } 
+}
+
 void PostMuon::analyze(const art::Event& evt)
 {
   // I'm so sorry that I have to do this.  And, my goodness, doing
@@ -668,9 +722,11 @@ void PostMuon::analyze(const art::Event& evt)
   art::Handle< std::vector<rawdata::RawTrigger> > rawtrigger;
   evt.getByLabel("daq", rawtrigger);
 
-  art::Handle< std::vector<rb::CellHit> > cellcol; // get hits
+  art::Handle< std::vector<rb::CellHit> > cellcol;
   evt.getByLabel(fRawDataLabel, cellcol);
 
+  art::Handle< std::vector<rb::Cluster> > slice;
+  evt.getByLabel("slicer", slice);
 
   art::Handle< std::vector<rb::Track> > tracks;
   evt.getByLabel("kalmantrackmerge", tracks);
@@ -679,12 +735,15 @@ void PostMuon::analyze(const art::Event& evt)
   //evt.getByLabel("windowtrack", tracks);
 
   art::FindOneP<remid::ReMId> track2remid(tracks, evt, "remid");
+  if(!track2remid.isValid()) { puts("No track2remid"); return; }
+
+  art::FindOneP<numue::NumuE> slice2numue(slice, evt, "numue");
+  if(!slice2numue.isValid()) { puts("No slice2numue"); return; }
 
   ntuple_header(evt);
 
-  if(rawtrigger->empty()){ puts("no raw trigger"); return; }
-
-  if(tracks->empty()) return;
+  if(rawtrigger->empty()) return;
+  if(tracks    ->empty()) return;
 
   int64_t event_length_tdc = 0, delta_tdc = 0;
   if(!delta_and_length(event_length_tdc, delta_tdc, flatdaq, rawtrigger)) return;
@@ -702,16 +761,24 @@ void PostMuon::analyze(const art::Event& evt)
   std::sort(sorted_hits.begin(), sorted_hits.end(), compare_cellhit);
 
   std::vector<trkinfo> sorted_tracks;
+
   for(int c = 0; c < (int)tracks->size(); c++){
     // Badly tracked tracks are not useful
     if((*tracks)[c].Stop().X() == 0 || (*tracks)[c].Stop().Y() == 0) continue;
 
     trkinfo t;
     t.trk = (*tracks)[c];
-    t.remid = track2remid.isValid()? track2remid.at(c)->Value(): 0;
+    t.remid = track2remid.at(c)->Value();
+
+    if(0 > (t.slice = which_slice_is_this_track_in(t, slice))) return;
+
+    t.slice_energy = slice2numue.at(t.slice)->E();
 
     sorted_tracks.push_back(t);
   }
+
+  fill_primary_track_info(sorted_tracks, slice->size());
+
   std::sort(sorted_tracks.begin(), sorted_tracks.end(), compare_track);
 
   std::vector<rb::CellHit> trkhits = make_trkhits(sorted_tracks);
@@ -733,8 +800,7 @@ void PostMuon::analyze(const art::Event& evt)
     // detector events
     if(fabs(tinfo.ex) >  750) continue;
     if(     tinfo.ey  < -730) continue;
-    if(     tinfo.ez  <   25) continue;
-    if(     tinfo.ez  > 5935) continue;
+    if(     tinfo.ez  <   25 || tinfo.ez  > 5935) continue;
 
     // Don't exclude tracks based on their starting positions, since I want this
     // to work for both cosmics and beam

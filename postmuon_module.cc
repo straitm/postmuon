@@ -59,6 +59,7 @@ static double MaxDistInCells = 0.123456; // dummy as well
 struct evtinfo{
   int run;
   int event;
+  int nslc; // number of slices
   double triggerlength;
   double starttime;
 };
@@ -388,6 +389,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%f ", tinfo.remid);
   fprintf(OUT, "%d ", tinfo.primary_in_slice);
   fprintf(OUT, "%f ", tinfo.slice_energy);
+  fprintf(OUT, "%d ", einfo.nslc);
 
   fprintf(OUT, "%d ", cluster.type);
 
@@ -647,6 +649,7 @@ static void ntuple_header(const art::Event & evt)
       "remid/F:"
       "primary/I:"
       "slce/F:"
+      "nslc/I:"
 
       "type/I:"
       "t/F:"
@@ -753,6 +756,7 @@ void PostMuon::analyze(const art::Event& evt)
   einfo.starttime = -(delta_tdc * 1000. / TDC_PER_US);
   einfo.run = evt.run();
   einfo.event = evt.event();
+  einfo.nslc = slice->size();
 
   // CellHits do *not* come in time order
   std::vector<rb::CellHit> sorted_hits;

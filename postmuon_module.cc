@@ -360,7 +360,8 @@ static void last_hits(int & __restrict__ lasthiti_even,
 
 static void print_ntuple_line(const evtinfo & __restrict__ einfo,
                               const trkinfo & __restrict__ tinfo,
-                              const cluster & __restrict__ cluster)
+                              const cluster & __restrict__ cluster,
+                              const int totalclusters)
 {
   const double timeleft = einfo.triggerlength - (tinfo.time - einfo.starttime);
   const double timeback =                        tinfo.time - einfo.starttime;
@@ -382,6 +383,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%.1f ", einfo.triggerlength/1000);
   fprintf(OUT, "%f ", tinfo.time/1000);
   fprintf(OUT, "%d ", cluster.i);
+  fprintf(OUT, "%d ", totalclusters);
   fprintf(OUT, "%.1f %.1f %.1f ", tsx, tsy, tsz);
   fprintf(OUT, "%.1f %.1f %.1f ", tx, ty, tz);
   fprintf(OUT, "%f ", timeleft/1000);
@@ -481,6 +483,23 @@ maybe 5-10%.)
 */
 enum clustertype { all, ex, ex2, xt };
 
+struct printinfo{
+  evtinfo einfo;
+  trkinfo tinfo;
+  cluster clu;
+};
+
+static printinfo make_printinfo(const evtinfo & __restrict__ einfo_,
+                                const trkinfo & __restrict__ tinfo_,
+                                const cluster & __restrict__ clu_)
+{
+  printinfo ans;
+  ans.einfo = einfo_;
+  ans.tinfo = tinfo_;
+  ans.clu= clu_;
+  return ans;
+}
+
 static void cluster_search(const int type,
   const evtinfo & __restrict__ einfo,
   const std::vector<rb::CellHit> & __restrict__ sorted_hits,
@@ -493,6 +512,8 @@ static void cluster_search(const int type,
   clu.i = 0;
   clu.type = type;
   clu.previous_cluster_t = tinfo.time;
+
+  std::vector<printinfo> toprint;
 
   for(int c = 0; c < (int)sorted_hits.size(); c++){
     const rb::CellHit & chit = sorted_hits[c];
@@ -522,7 +543,7 @@ static void cluster_search(const int type,
     const bool newcluster = chit.TNS() > clu.last_accepted_time + 500.0;
 
     if(newcluster && clu.nhit){
-      print_ntuple_line(einfo, tinfo, clu);
+      toprint.push_back(make_printinfo(einfo, tinfo, clu));
       clu.i++;
       const float thistime = float(clu.tsum)/clu.nhit;
       resetcluster(clu);
@@ -550,7 +571,12 @@ static void cluster_search(const int type,
   }
 
   // print last cluster, or track info if no cluster
-  print_ntuple_line(einfo, tinfo, clu);
+  toprint.push_back(make_printinfo(einfo, tinfo, clu));
+  for(unsigned int i = 0; i < toprint.size(); i++)
+    print_ntuple_line(toprint[i].einfo,
+                      toprint[i].tinfo,
+                      toprint[i].clu,
+                      toprint.size());
 }
 
 PostMuon::~PostMuon() { }
@@ -638,6 +664,7 @@ static void ntuple_header(const art::Event & evt)
       "triggerlength/F:"
       "trktime/F:"
       "i/I:"
+      "nclu/I:"
       "trkstartx/F:"
       "trkstarty/F:"
       "trkstartz/F:"

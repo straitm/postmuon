@@ -30,6 +30,8 @@
 #include "Utilities/AssociationUtil.h"
 
 
+#include "StandardRecord/StandardRecord.h"
+
 #include "RecoBase/CellHit.h"
 #include "RecoBase/RecoHit.h"
 #include "RecoBase/Track.h"
@@ -69,6 +71,7 @@ struct trkinfo{
   int i; // index of track in the track array
   int ntrk; // total number of tracks in this event
   int slice; // the index of the slice for this track
+  bool contained_slice;
   float slice_energy; // Energy of the slice holding this track
   bool primary_in_slice; // Is this the longest track in the slice?
   double time;
@@ -392,6 +395,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%d ", tinfo.primary_in_slice);
   fprintf(OUT, "%f ", tinfo.slice_energy);
   fprintf(OUT, "%d ", einfo.nslc);
+  fprintf(OUT, "%d ", tinfo.contained_slice);
 
   fprintf(OUT, "%d ", cluster.type);
 
@@ -515,7 +519,7 @@ static void cluster_search(const int type,
 
   std::vector<printinfo> toprint;
 
-  for(int c = 0; c < (int)sorted_hits.size(); c++){
+  for(unsigned int c = 0; c < sorted_hits.size(); c++){
     const rb::CellHit & chit = sorted_hits[c];
 
     const double dist = hit_near_track(tinfo, chit);
@@ -677,6 +681,7 @@ static void ntuple_header(const art::Event & evt)
       "primary/I:"
       "slce/F:"
       "nslc/I:"
+      "contained/I:"
 
       "type/I:"
       "t/F:"
@@ -739,6 +744,29 @@ static void fill_primary_track_info(std::vector<trkinfo> & ts, const int nslc)
   } 
 }
 
+// Return true iff this slice is numu-contained
+static bool containedND(const art::Ptr<caf::StandardRecord> sr)
+{
+  // Lifted from CAFAna/Cuts/NumuCuts.h, development 2017-03-28 I've
+  // removed the trk.kalman.tracks lines because they make it seg
+  // fault, even if I check that the vector is not empty, why?! But
+  // since I output the start and stop position anyway, and don't allow
+  // tracks that include the muon catcher, track position checks are
+  // not really needed. Ditto for sr->energy.numu.ndhadcalcatE and
+  // ndhadcaltranE, which I found to be always nan. Alex R says "I think
+  // the calibration in development is still the one that's broken for
+  // the nd muon catcher." I don't need them since I disallow the muon
+  // catcher anyway.
+  const bool a = sr->trk.kalman.ntracks > sr->trk.kalman.idxremid,
+             b = sr->slc.ncellsfromedge > 1,
+             c = sr->slc.firstplane > 1,   // skip 0 and 1
+             d = sr->slc.lastplane  < 212, // skip 212 and 213
+             e = sr->sel.contain.kalfwdcellnd > 4,
+             f = sr->sel.contain.kalbakcellnd > 8;
+
+  return a && b && c && d && e && f;
+}
+
 void PostMuon::analyze(const art::Event& evt)
 {
   // I'm so sorry that I have to do this.  And, my goodness, doing
@@ -770,6 +798,9 @@ void PostMuon::analyze(const art::Event& evt)
   art::FindOneP<numue::NumuE> slice2numue(slice, evt, "numue");
   if(!slice2numue.isValid()) { puts("No slice2numue"); return; }
 
+  art::FindOneP<caf::StandardRecord> slice2caf(slice, evt, "cafmaker");
+  if(!slice2caf.isValid()) { puts("No slice2caf"); return; }
+
   ntuple_header(evt);
 
   if(rawtrigger->empty()) return;
@@ -793,7 +824,7 @@ void PostMuon::analyze(const art::Event& evt)
 
   std::vector<trkinfo> sorted_tracks;
 
-  for(int c = 0; c < (int)tracks->size(); c++){
+  for(unsigned int c = 0; c < tracks->size(); c++){
     // Badly tracked tracks are not useful
     if((*tracks)[c].Stop().X() == 0 || (*tracks)[c].Stop().Y() == 0) continue;
 
@@ -804,6 +835,8 @@ void PostMuon::analyze(const art::Event& evt)
     if(0 > (t.slice = which_slice_is_this_track_in(t, slice))) return;
 
     t.slice_energy = slice2numue.at(t.slice)->E();
+
+    t.contained_slice = containedND(slice2caf.at(t.slice));
 
     sorted_tracks.push_back(t);
   }

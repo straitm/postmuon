@@ -888,10 +888,10 @@ void PostMuon::analyze(const art::Event& evt)
 
     t.true_nupdg = t.true_nucc = 0;
     if(!is_data){
-      // This is horrible. I cannot figure out how to mash
-      // what I have into any of the acceptable types for
-      // SliceToNeutrinoInteractions in a cheap way, so I am just
-      // constructing my own goddam vector of CellHits.
+      // Horrible. I cannot figure out how to mash what I have into
+      // any of the acceptable types for SliceToNeutrinoInteractions
+      // in a cheap way, so I am just constructing my own goddam
+      // vector of CellHits. I think this is very slow...
       std::vector<rb::CellHit> this_slc;
       for(unsigned int h = 0; h < (*slice)[t.slice].NCell(); h++)
         this_slc.push_back(*((*slice)[t.slice].Cell(h)));

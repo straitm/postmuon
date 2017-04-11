@@ -75,6 +75,7 @@ struct trkinfo{
   bool contained_slice;
   float slice_energy; // Energy of the slice holding this track
   int true_nupdg; // True PDG code of neutrino making this slice, or zero for data
+  int true_pdg; // True PDG code of particle making this track, or zero for data
   int true_nucc; // 1 if this slice is MC and true CC, zero otherwise
   bool primary_in_slice; // Is this the longest track in the slice?
   double time;
@@ -408,6 +409,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%d ", einfo.nslc);
   fprintf(OUT, "%d ", tinfo.contained_slice);
   fprintf(OUT, "%d ", tinfo.true_nupdg);
+  fprintf(OUT, "%d ", tinfo.true_pdg);
   fprintf(OUT, "%d ", tinfo.true_nucc);
 
 
@@ -706,6 +708,7 @@ static void ntuple_header(const art::Event & evt)
       "nslc/I:"
       "contained/I:"
       "true_nupdg/I:"
+      "true_pdg/I:"
       "true_nucc/I:"
 
       "type/I:"
@@ -838,7 +841,7 @@ void PostMuon::analyze(const art::Event& evt)
   art::ServiceHandle<cheat::BackTracker> backtracker_thing;
 
   // Is this an ok way to test for data vs. MC?
-  const bool is_data = !backtracker->HaveTruthInfo();
+  const bool is_data = !backtracker_thing->HaveTruthInfo();
 
   int64_t event_length_tdc = 0, delta_tdc = 0;
   if(is_data){
@@ -886,7 +889,7 @@ void PostMuon::analyze(const art::Event& evt)
 
     t.contained_slice = containedND(slice2caf.at(t.slice));
 
-    t.true_nupdg = t.true_nucc = 0;
+    t.true_pdg = t.true_nupdg = t.true_nucc = 0;
     if(!is_data){
       // Horrible. I cannot figure out how to mash what I have into
       // any of the acceptable types for SliceToNeutrinoInteractions
@@ -902,6 +905,23 @@ void PostMuon::analyze(const art::Event& evt)
         t.true_nupdg = truths[0].neutrinoInt->GetNeutrino().Nu().PdgCode();
         t.true_nucc  = !truths[0].neutrinoInt->GetNeutrino().CCNC();
       }
+
+      // Ditto above complaint. If there's a way to directly pass a
+      // track in, I don't see it, so I have to copy the whole track
+      // into a vector. I'm supposed to at least be able to pass in
+      // a vector of pointers, except when I try to construct such a
+      // thing, I get horribly tangled up in art::Ptrs when real pointers
+      // are wanted and conflicting sets of where "const" goes, and I
+      // give up. I have other work to do.
+      std::vector<rb::CellHit> trackhits;
+      for(unsigned int i = 0; i < (*tracks)[c].NCell(); i++)
+        trackhits.push_back(*(*tracks)[c].Cell(i));
+
+      const std::vector<const sim::Particle *> particles = backtracker_thing
+        ->HitsToParticle(trackhits);
+
+      // Can be empty if all the hits are noise
+      if(!particles.empty()) t.true_pdg = particles[0]->PdgCode();
     }
 
     sorted_tracks.push_back(t);

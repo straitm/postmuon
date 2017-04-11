@@ -31,6 +31,7 @@
 
 
 #include "StandardRecord/StandardRecord.h"
+#include "MCCheater/BackTracker.h"
 
 #include "RecoBase/CellHit.h"
 #include "RecoBase/RecoHit.h"
@@ -73,6 +74,8 @@ struct trkinfo{
   int slice; // the index of the slice for this track
   bool contained_slice;
   float slice_energy; // Energy of the slice holding this track
+  int true_nupdg; // True PDG code of neutrino making this slice, or zero for data
+  int true_nucc; // 1 if this slice is MC and true CC, zero otherwise
   bool primary_in_slice; // Is this the longest track in the slice?
   double time;
   int lasthiti_even, lasthiti_odd;
@@ -86,6 +89,7 @@ struct cluster{
   float first_accepted_time; // time of the first hit in the cluster
   float last_accepted_time; // time of the last hit in the cluster
   float mindist;  // minimum hit distance from track end
+  float maxdist;  // maximum hit distance from track end
   float dist2sum; // summed hit distance from track end
   float tsum;     // summed times, in ns, of a cluster of delayed hits
   float previous_cluster_t; // what it says
@@ -95,6 +99,9 @@ struct cluster{
   int nhit;       // number of hits in full delayed cluster
   int nhitx;      // number of x hits in full delayed cluster
   int nhity;      // number of y hits in full delayed cluster
+  int nhitover35pe; // as it says
+  int nhitover35pex; //
+  int nhitover35pey; //
 };
 
 const float INVALID_TIME = -1000000;
@@ -104,6 +111,7 @@ static void resetcluster(cluster & res)
   res.first_accepted_time = INVALID_TIME;
   res.last_accepted_time  = INVALID_TIME;
   res.mindist = 1000000;
+  res.maxdist = 0;
   res.dist2sum = 0;
   res.tsum = 0;
   res.esum = 0;
@@ -112,6 +120,9 @@ static void resetcluster(cluster & res)
   res.nhit = 0;
   res.nhitx = 0;
   res.nhity = 0;
+  res.nhitover35pe = 0;
+  res.nhitover35pex = 0;
+  res.nhitover35pey = 0;
   res.previous_cluster_t = 0;
 }
 
@@ -396,6 +407,9 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%f ", tinfo.slice_energy);
   fprintf(OUT, "%d ", einfo.nslc);
   fprintf(OUT, "%d ", tinfo.contained_slice);
+  fprintf(OUT, "%d ", tinfo.true_nupdg);
+  fprintf(OUT, "%d ", tinfo.true_nucc);
+
 
   fprintf(OUT, "%d ", cluster.type);
 
@@ -411,6 +425,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
     fprintf(OUT, "0 ");
 
   fprintf(OUT, "%.3f ", cluster.mindist);
+  fprintf(OUT, "%.3f ", cluster.maxdist);
 
   if(cluster.dist2sum == 0) fprintf(OUT, "0 ");
   else fprintf(OUT, "%.3f ", cluster.dist2sum/cluster.nhit);
@@ -420,6 +435,8 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%d ", cluster.adcsum);
 
   fprintf(OUT, "%d %d %d ", cluster.nhit, cluster.nhitx, cluster.nhity);
+  fprintf(OUT, "%d %d %d ", cluster.nhitover35pe,
+          cluster.nhitover35pex, cluster.nhitover35pey);
   fprintf(OUT, "%.3f ",
           (cluster.last_accepted_time - cluster.first_accepted_time)/1000);
   fprintf(OUT, "\n");
@@ -560,9 +577,15 @@ static void cluster_search(const int type,
     clu.nhit++;
     if(chit.View() == geo::kX) clu.nhitx++;
     else                       clu.nhity++;
+    if(chit.PE() > 35.0){
+      clu.nhitover35pe++;
+      if(chit.View() == geo::kX) clu.nhitover35pex++;
+      else                       clu.nhitover35pey++;
+    }
 
     clu.dist2sum += dist*dist;
     if(dist < clu.mindist) clu.mindist = dist;
+    if(dist > clu.maxdist) clu.maxdist = dist;
 
     clu.last_accepted_time = chit.TNS(); // because they're sorted by TNS
     if(clu.first_accepted_time == INVALID_TIME)
@@ -682,11 +705,14 @@ static void ntuple_header(const art::Event & evt)
       "slce/F:"
       "nslc/I:"
       "contained/I:"
+      "true_nupdg/I:"
+      "true_nucc/I:"
 
       "type/I:"
       "t/F:"
       "dt/F:"
       "mindist/F:"
+      "maxdist/F:"
       "dist2/F:"
       "e/F:"
       "pe/F:"
@@ -694,6 +720,9 @@ static void ntuple_header(const art::Event & evt)
       "nhit/I:"
       "nhitx/I:"
       "nhity/I:"
+      "nhitover35pe/I:"
+      "nhitover35pex/I:"
+      "nhitover35pey/I:"
       "ctlen/F"
       "\n");
   }
@@ -740,7 +769,7 @@ static void fill_primary_track_info(std::vector<trkinfo> & ts, const int nslc)
     // ... and label it as such and the rest as not such
     for(unsigned int j = 0; j < ts.size(); j++)
       if(ts[j].slice == i)
-        ts[j].primary_in_slice = best == j;
+        ts[j].primary_in_slice = (best == j);
   } 
 }
 
@@ -806,8 +835,27 @@ void PostMuon::analyze(const art::Event& evt)
   if(rawtrigger->empty()) return;
   if(tracks    ->empty()) return;
 
+  art::ServiceHandle<cheat::BackTracker> backtracker_thing;
+
+  // Is this an ok way to test for data vs. MC?
+  const bool is_data = !backtracker->HaveTruthInfo();
+
   int64_t event_length_tdc = 0, delta_tdc = 0;
-  if(!delta_and_length(event_length_tdc, delta_tdc, flatdaq, rawtrigger)) return;
+  if(is_data){
+    art::Handle< std::vector<rawdata::FlatDAQData> > flatdaq;
+    evt.getByLabel("daq", flatdaq);
+
+    art::Handle< std::vector<rawdata::RawTrigger> > rawtrigger;
+    evt.getByLabel("daq", rawtrigger);
+
+    if(rawtrigger->empty()) return;
+
+    if(!delta_and_length(event_length_tdc, delta_tdc, flatdaq, rawtrigger)) return;
+  }
+  else{ // XXX
+    event_length_tdc = 500 * 64;
+    delta_tdc = 224 * 64;
+  }
 
   evtinfo einfo;
   einfo.triggerlength = event_length_tdc * 1000. / TDC_PER_US;
@@ -837,6 +885,24 @@ void PostMuon::analyze(const art::Event& evt)
     t.slice_energy = slice2numue.at(t.slice)->E();
 
     t.contained_slice = containedND(slice2caf.at(t.slice));
+
+    t.true_nupdg = t.true_nucc = 0;
+    if(!is_data){
+      // This is horrible. I cannot figure out how to mash
+      // what I have into any of the acceptable types for
+      // SliceToNeutrinoInteractions in a cheap way, so I am just
+      // constructing my own goddam vector of CellHits.
+      std::vector<rb::CellHit> this_slc;
+      for(unsigned int h = 0; h < (*slice)[t.slice].NCell(); h++)
+        this_slc.push_back(*((*slice)[t.slice].Cell(h)));
+
+      std::vector<cheat::NeutrinoEffPur> truths =
+        backtracker_thing->SliceToNeutrinoInteractions(this_slc, sorted_hits);
+      if(!truths.empty()){
+        t.true_nupdg = truths[0].neutrinoInt->GetNeutrino().Nu().PdgCode();
+        t.true_nucc  = !truths[0].neutrinoInt->GetNeutrino().CCNC();
+      }
+    }
 
     sorted_tracks.push_back(t);
   }

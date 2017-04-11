@@ -7,7 +7,7 @@ include SoftRelTools/standard.mk
 include SoftRelTools/arch_spec_art.mk
 include SoftRelTools/arch_spec_root.mk
 
-override CPPFLAGS := $(CPPFLAGS) -I$(NOVADAQ_INC)
+override CPPFLAGS := $(CPPFLAGS) -I$(NOVADAQ_INC) -I$(NUTOOLS_INC)
 
 #LIBLINK     := \
 #-l$(PACKAGE)

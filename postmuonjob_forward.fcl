@@ -17,6 +17,7 @@ services:
   scheduler:    { wantSummary: true }
   message:      @local::standard_out
   Calibrator:   @local::standard_calibrator
+  BackTracker:   @local::standard_backtracker
   @table::standard_services
 }
 

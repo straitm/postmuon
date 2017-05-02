@@ -54,7 +54,7 @@
 #include <signal.h>
 
 static FILE * OUT = NULL;
-static int NhitTrackTimeAveraging = 1; // dummy, to be overwritten in PostMuon()
+static int NhitTrackTimeAveraging = 1; // to be overwritten in PostMuon()
 static bool TracksAreDown = true; // to be overwritten in PostMuon()
 static double MaxDistInCells = 0.123456; // dummy as well
 
@@ -74,8 +74,8 @@ struct trkinfo{
   int slice; // the index of the slice for this track
   bool contained_slice;
   float slice_energy; // Energy of the slice holding this track
-  int true_nupdg; // True PDG code of neutrino making this slice, or zero for data
-  int true_pdg; // True PDG code of particle making this track, or zero for data
+  int true_nupdg; // True PDG code of neutrino making this slice, or 0 for data
+  int true_pdg; // True PDG code of particle making this track, or 0 for data
   int true_nucc; // 1 if this slice is MC and true CC, zero otherwise
   bool primary_in_slice; // Is this the longest track in the slice?
   double time;
@@ -164,17 +164,17 @@ namespace PostMuon {
 static int TDC_PER_US = 64;
 static int US_PER_MICROSLICE = 50; // I hope this is always true
 
-// Geometrically about correct, but perhaps should be scaled by density or
-// radiation length or neutron cross section or something.  Or not, since
-// which of those is right depends on what you're looking at.
+// Geometrically about correct, but perhaps should be scaled by density
+// or radiation length or neutron cross section or something. Or not,
+// since which of those is right depends on what you're looking at.
 const double planes_per_cell = 76./39.;
 
 /*
-  Return the average hit time of the latest 'NhitTrackTimeAveraging' hits, in
-  nanoseconds.
+  Return the average hit time of the latest 'NhitTrackTimeAveraging'
+  hits, in nanoseconds.
 
-  With a largish 'NhitTrackTimeAveraging', this is meant to provide a robust
-  measure of the track time, even if an early Michel decay gets
+  With a largish 'NhitTrackTimeAveraging', this is meant to provide a
+  robust measure of the track time, even if an early Michel decay gets
   reconstructed as part of the track. This also smears out weird timing
   effects like those shown in doc-16889-v2 which may or may not be a
   good thing.
@@ -188,7 +188,7 @@ static double mean_late_track_time(const rb::Track & trk)
   std::sort(times.begin(), times.end());
 
   double acc = 0;
-  for(unsigned int i = std::max(0, (int)times.size() - NhitTrackTimeAveraging);
+  for(unsigned int i = std::max(0, (int)times.size()-NhitTrackTimeAveraging);
       i < times.size(); i++)
     acc += times[i];
 
@@ -205,10 +205,10 @@ static bool same_module(const int cell1, const int cell2)
 }
 
 /*
-  Returns true if the given hit is in the same module as any hit coincident
-  (within the time given below) with the given track.  Along with excluding the
-  track itself, this is meant to do better at excluding cells that are
-  inefficient.
+  Returns true if the given hit is in the same module as any hit
+  coincident (within the time given below) with the given track. Along
+  with excluding the track itself, this is meant to do better at
+  excluding cells that are inefficient.
 */
 static bool hit_in_track_coincident_module(
   const rb::CellHit & __restrict__ chit,
@@ -287,6 +287,34 @@ static bool is_increasing_z(const rb::Track & trk)
 }
 
 /*
+  If the hit is not in the same view as the last hit of the track,
+  instead of using the cell number of the last hit in the wrong
+  view as the track's ending cell position, correct it by angle
+  assuming the track goes exactly one plane further.
+*/
+static double cell_number_correction(const bool same_view,
+                                     const int hit_in_x,
+                                     const rb::Track & trk)
+{
+  if(same_view) return 0;
+
+  if(trk.StopDir().Z() == 0) return 0; // Yes, this happens
+
+  const double correction =
+    planes_per_cell * (hit_in_x?trk.StopDir().X():trk.StopDir().Y())
+         /trk.StopDir().Z();
+
+  return correction;
+}
+
+// Cells are staggered in the same view from one plane to the next.
+// Return the position in cell number including this offset.
+static double cell_coord_off(const int plane)
+{
+  return (plane%2) == ((plane/2)%2)? -0.5: 0.0;
+}
+
+/*
   Takes a track and a hit and determines the distance between the
   end of the track and the hit.  lasthiti_{even,odd} are the indices
   of the last hits in each view.
@@ -296,21 +324,33 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
                                    const int lasthiti_even,
                                    const int lasthiti_odd)
 {
-  const int lastplane_even = trk.Cell(lasthiti_even)->Plane();
-  const int lastplane_odd =  trk.Cell(lasthiti_odd) ->Plane();
-  const int lastcell_even =  trk.Cell(lasthiti_even)->Cell();
-  const int lastcell_odd =   trk.Cell(lasthiti_odd) ->Cell();
+  const int last_tplane_even = trk.Cell(lasthiti_even)->Plane();
+  const int last_tplane_odd  = trk.Cell(lasthiti_odd) ->Plane();
+  const int lastcell_even    = trk.Cell(lasthiti_even)->Cell();
+  const int lastcell_odd     = trk.Cell(lasthiti_odd) ->Cell();
 
   const bool increasing_z = is_increasing_z(trk);
 
-  const int lastplane = increasing_z?std::max(lastplane_even, lastplane_odd)
-                                    :std::min(lastplane_even, lastplane_odd);
-  return
-    chit.Plane()%2 == 0 ?
-      sqrt(pow(planes_per_cell*(chit.Plane() - lastplane)   , 2) +
-           pow(                 chit.Cell()  - lastcell_even, 2))
-   :  sqrt(pow(planes_per_cell*(chit.Plane() - lastplane)   , 2) +
-           pow(                 chit.Cell()  - lastcell_odd , 2));
+  const int lastplane = increasing_z?
+                        std::max(last_tplane_even, last_tplane_odd)
+                        :std::min(last_tplane_even, last_tplane_odd);
+
+  const double hit_cc = chit.Cell() + cell_coord_off(chit.Plane());
+
+  // It is really easy to get confused here.  Checked the results
+  // with a number of events of different cases in the event display.
+
+  const double track_cc =
+    (chit.Plane()%2 == 0? lastcell_even: lastcell_odd)
+
+    + cell_number_correction(chit.Plane()%2 == lastplane%2,
+                             chit.View() == geo::kX, trk)
+
+    + cell_coord_off(chit.Plane()%2 == 0?last_tplane_even :last_tplane_odd);
+
+  return sqrt(
+    pow(planes_per_cell*(chit.Plane() - lastplane), 2) +
+    pow(                       hit_cc - track_cc  , 2));
 }
 
 /*
@@ -327,8 +367,8 @@ static double hit_near_track(const trkinfo & __restrict__ tinfo,
   // Accept the hit even if it is before the track!  Because this gets
   // us the background level in an unbiased way.
 
-  const double dist = dist_trackend_to_cell(tinfo.trk, chit, tinfo.lasthiti_even,
-                                            tinfo.lasthiti_odd);
+  const double dist = dist_trackend_to_cell(tinfo.trk, chit,
+    tinfo.lasthiti_even, tinfo.lasthiti_odd);
 
   if(dist > MaxDistInCells) return -1;
 
@@ -422,7 +462,8 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
     fprintf(OUT, "-1 ");
 
   if(cluster.nhit)
-    fprintf(OUT, "%f ", (float(cluster.tsum)/cluster.nhit-cluster.previous_cluster_t)/1000);
+    fprintf(OUT, "%f ",
+      (float(cluster.tsum)/cluster.nhit-cluster.previous_cluster_t)/1000);
   else
     fprintf(OUT, "0 ");
 
@@ -460,7 +501,8 @@ PostMuon::PostMuon(fhicl::ParameterSet const& pset)
 
 void PostMuon::endJob()
 {
-  fclose(OUT);
+  if(OUT != NULL) fclose(OUT);
+  OUT = NULL;
 }
 
 // Compare tracks by their time
@@ -739,7 +781,8 @@ static int which_slice_is_this_track_in(
   // I'm sure this is not the best way, but I have had it with trying to
   // figure out what the best way is, and I'm just going to do it *some*
   // way.
-  const art::Ptr<rb::CellHit> ahit = t.trk.Cell(0); // some random hit on the track
+  const art::Ptr<rb::CellHit> ahit =
+    t.trk.Cell(0); // some random hit on the track
 
   // Could probably skip slice 0 since it is the noise slice, but let's not
   // in case that convention changes.
@@ -853,7 +896,8 @@ void PostMuon::analyze(const art::Event& evt)
 
     if(rawtrigger->empty()) return;
 
-    if(!delta_and_length(event_length_tdc, delta_tdc, flatdaq, rawtrigger)) return;
+    if(!delta_and_length(event_length_tdc, delta_tdc, flatdaq, rawtrigger))
+      return;
   }
   else{ // XXX
     event_length_tdc = 500 * 64;

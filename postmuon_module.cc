@@ -314,6 +314,16 @@ static double cell_coord_off(const int plane)
   return (plane%2) == ((plane/2)%2)? -0.5: 0.0;
 }
 
+// There is extra material at each extrusion boundary;
+// count how many we cross (typically zero or one) so that
+// it can be corrected for.
+static int n_extrusions_boundaries_crossed(const int cell1,
+                                           const int cell2)
+{
+  const int cells_per_extrusion = 16; // 2 extrusions per module
+  return abs(cell1/cells_per_extrusion - cell2/cells_per_extrusion);
+}
+
 /*
   Takes a track and a hit and determines the distance between the
   end of the track and the hit.  lasthiti_{even,odd} are the indices
@@ -326,8 +336,8 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
 {
   const int last_tplane_even = trk.Cell(lasthiti_even)->Plane();
   const int last_tplane_odd  = trk.Cell(lasthiti_odd) ->Plane();
-  const int lastcell_even    = trk.Cell(lasthiti_even)->Cell();
-  const int lastcell_odd     = trk.Cell(lasthiti_odd) ->Cell();
+  const int last_tcell_even  = trk.Cell(lasthiti_even)->Cell();
+  const int last_tcell_odd   = trk.Cell(lasthiti_odd) ->Cell();
 
   const bool increasing_z = is_increasing_z(trk);
 
@@ -341,16 +351,28 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
   // with a number of events of different cases in the event display.
 
   const double track_cc =
-    (chit.Plane()%2 == 0? lastcell_even: lastcell_odd)
+    (chit.Plane()%2 == 0? last_tcell_even: last_tcell_odd)
 
     + cell_number_correction(chit.Plane()%2 == lastplane%2,
                              chit.View() == geo::kX, trk)
 
     + cell_coord_off(chit.Plane()%2 == 0?last_tplane_even :last_tplane_odd);
 
+  /*                scint length  & density, PVC length & density
+    standardcell = 3.5565 * 1.005 * 0.8530 + 0.368      *  1.49
+    endcell      = 3.5565 * 0.964 * 0.8530 + 0.51*2     *  1.49
+    endcell/standardcell - 1 = 0.235
+
+    This only does a correction in the view that the hit is in.
+    Of course, it is also possible to cross an extrusion boundary
+    in the other view.  It's a small correction...
+  */
+  const double addition_for_extrusion_boundaries =
+    0.235 * n_extrusions_boundaries_crossed(chit.Cell(),
+              (chit.Plane()%2 == 0? last_tcell_even: last_tcell_odd));
   return sqrt(
     pow(planes_per_cell*(chit.Plane() - lastplane), 2) +
-    pow(                       hit_cc - track_cc  , 2));
+    pow(addition_for_extrusion_boundaries + hit_cc - track_cc, 2));
 }
 
 /*
@@ -816,7 +838,7 @@ static void fill_primary_track_info(std::vector<trkinfo> & ts, const int nslc)
     for(unsigned int j = 0; j < ts.size(); j++)
       if(ts[j].slice == i)
         ts[j].primary_in_slice = (best == j);
-  } 
+  }
 }
 
 // Return true iff this slice is numu-contained

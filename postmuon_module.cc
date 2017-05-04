@@ -63,6 +63,7 @@ static double MaxDistInCells = 0.123456; // dummy as well
 
 struct evtinfo{
   int run;
+  int subrun;
   int event;
   int nslc; // number of slices
   double triggerlength;
@@ -454,7 +455,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   const double ty = tinfo.ey;
   const double tz = tinfo.ez;
 
-  fprintf(OUT, "%d %d ", einfo.run, einfo.event);
+  fprintf(OUT, "%d %d %d ", einfo.run, einfo.subrun, einfo.event);
   fprintf(OUT, "%f ", sqrt(pow(tinfo.sx - tinfo.ex, 2)
                          + pow(tinfo.sy - tinfo.ey, 2)
                          + pow(tinfo.sz - tinfo.ez, 2)));
@@ -754,6 +755,7 @@ static void ntuple_header(const art::Event & evt)
     }
     fprintf(OUT,
       "run/I:"
+      "subrun/I:"
       "event/I:"
       "trklen/F:"
       "trk/I:"
@@ -936,6 +938,7 @@ void PostMuon::analyze(const art::Event& evt)
   einfo.triggerlength = event_length_tdc * 1000. / TDC_PER_US;
   einfo.starttime = -(delta_tdc * 1000. / TDC_PER_US);
   einfo.run = evt.run();
+  einfo.subrun = evt.subRun();
   einfo.event = evt.event();
   einfo.nslc = slice->size();
 

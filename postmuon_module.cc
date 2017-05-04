@@ -19,6 +19,8 @@
 #include "DAQChannelMap/DAQChannelMap.h"
 #include "RawData/RawSumDropMB.h"
 
+#include "Simulation/ParticleNavigator.h"
+
 #include "art/Framework/Principal/Run.h"
 #include "art/Framework/Principal/Event.h"
 #include "art/Framework/Services/Registry/ServiceHandle.h"
@@ -76,7 +78,8 @@ struct trkinfo{
   float slice_energy; // Energy of the slice holding this track
   int true_nupdg; // True PDG code of neutrino making this slice, or 0 for data
   int true_pdg; // True PDG code of particle making this track, or 0 for data
-  int true_nucc; // 1 if this slice is MC and true CC, zero otherwise
+  int true_nucc; // 1 if this slice is MC and true CC, 0 otherwise
+  int true_atom_cap; // 1 if this is a mu-, pi- or K- that stops, else 0
   bool primary_in_slice; // Is this the longest track in the slice?
   double time;
   int lasthiti_even, lasthiti_odd;
@@ -473,6 +476,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%d ", tinfo.true_nupdg);
   fprintf(OUT, "%d ", tinfo.true_pdg);
   fprintf(OUT, "%d ", tinfo.true_nucc);
+  fprintf(OUT, "%d ", tinfo.true_atom_cap);
 
 
   fprintf(OUT, "%d ", cluster.type);
@@ -774,6 +778,7 @@ static void ntuple_header(const art::Event & evt)
       "true_nupdg/I:"
       "true_pdg/I:"
       "true_nucc/I:"
+      "true_atom_cap/I:"
 
       "type/I:"
       "t/F:"
@@ -904,6 +909,7 @@ void PostMuon::analyze(const art::Event& evt)
   if(tracks    ->empty()) return;
 
   art::ServiceHandle<cheat::BackTracker> backtracker_thing;
+  const sim::ParticleNavigator& pnav = backtracker_thing->ParticleNavigator();
 
   // Is this an ok way to test for data vs. MC?
   const bool is_data = !backtracker_thing->HaveTruthInfo();
@@ -955,7 +961,7 @@ void PostMuon::analyze(const art::Event& evt)
 
     t.contained_slice = containedND(slice2caf.at(t.slice));
 
-    t.true_pdg = t.true_nupdg = t.true_nucc = 0;
+    t.true_pdg = t.true_nupdg = t.true_nucc = t.true_atom_cap = 0;
     if(!is_data){
       // Horrible. I cannot figure out how to mash what I have into
       // any of the acceptable types for SliceToNeutrinoInteractions
@@ -987,7 +993,29 @@ void PostMuon::analyze(const art::Event& evt)
         ->HitsToParticle(trackhits);
 
       // Can be empty if all the hits are noise
-      if(!particles.empty()) t.true_pdg = particles[0]->PdgCode();
+      if(!particles.empty()){
+        t.true_pdg = particles[0]->PdgCode();
+
+        // As of 2017-05-03, sim::Particle::EndE() seems to always
+        // return the particle's mass, no matter what happens to it.
+        // sim::Particle::EndProcess() is also not useful for finding
+        // out whether a particle has stopped, since it always holds an
+        // empty string. So to find out what happens to a particle, you
+        // have to laboriously look at its daughters...
+        for(int d = 0; d < particles[0]->NumberDaughters(); d++){
+          sim::ParticleNavigator::const_iterator it =
+            pnav.find(particles[0]->Daughter(d));
+
+          if(it == pnav.end()) continue;
+
+          const std::string dproc = it->second->Process();
+          if(dproc == "muMinusCaptureAtRest" ||
+             dproc == "hBertiniCaptureAtRest"){
+            t.true_atom_cap = 1;
+            break;
+          }
+        }
+      }
     }
 
     sorted_tracks.push_back(t);

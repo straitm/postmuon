@@ -85,6 +85,7 @@ struct trkinfo{
   double time;
   int lasthiti_even, lasthiti_odd;
   float sx, sy, sz, ex, ey, ez; // start and end position, after flip correction
+  float end_dx, end_dy, end_dz; // ending direction
   double remid;
 };
 
@@ -107,6 +108,19 @@ struct cluster{
   int nhitover35pe; // as it says
   int nhitover35pex; //
   int nhitover35pey; //
+
+  // In units of cell widths:
+  float x_dz; // In x view, mean difference in z from track end to hit
+  float dx;   // mean difference in x in x view
+  float y_dz; // Ditto y view
+  float dy;   // Ditto y view
+
+  float cosx; // cosine of the mean direction from track end
+  float cosy; // wrt track dir in the x and y views, respectively.
+              // Definition is a little janky because it uses my
+              // plane/cell distance defintions for the cluster, which
+              // has some density weighting, but rb::Track's direction
+              // for the track, which is in plain old space.
 };
 
 const float INVALID_TIME = -1000000;
@@ -129,6 +143,12 @@ static void resetcluster(cluster & res)
   res.nhitover35pex = 0;
   res.nhitover35pey = 0;
   res.previous_cluster_t = 0;
+  res.x_dz = 0;
+  res.y_dz = 0;
+  res.dx = 0;
+  res.dy = 0;
+  res.cosx = -2;
+  res.cosy = -2;
 }
 
 static cluster mkcluster()
@@ -336,7 +356,9 @@ static int n_extrusions_boundaries_crossed(const int cell1,
 static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
                                    const rb::CellHit & __restrict__ chit,
                                    const int lasthiti_even,
-                                   const int lasthiti_odd)
+                                   const int lasthiti_odd,
+                                   float & dplane,
+                                   float & dcell)
 {
   const int last_tplane_even = trk.Cell(lasthiti_even)->Plane();
   const int last_tplane_odd  = trk.Cell(lasthiti_odd) ->Plane();
@@ -374,9 +396,11 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
   const double addition_for_extrusion_boundaries =
     0.235 * n_extrusions_boundaries_crossed(chit.Cell(),
               (chit.Plane()%2 == 0? last_tcell_even: last_tcell_odd));
-  return sqrt(
-    pow(planes_per_cell*(chit.Plane() - lastplane), 2) +
-    pow(addition_for_extrusion_boundaries + hit_cc - track_cc, 2));
+
+  dplane = planes_per_cell*(chit.Plane() - lastplane);
+  dcell = addition_for_extrusion_boundaries + hit_cc - track_cc;
+
+  return sqrt(pow(dplane, 2) + pow(dcell, 2));
 }
 
 /*
@@ -393,8 +417,10 @@ static double hit_near_track(const trkinfo & __restrict__ tinfo,
   // Accept the hit even if it is before the track!  Because this gets
   // us the background level in an unbiased way.
 
+  float dplane, dcell; /* unused here */
+
   const double dist = dist_trackend_to_cell(tinfo.trk, chit,
-    tinfo.lasthiti_even, tinfo.lasthiti_odd);
+    tinfo.lasthiti_even, tinfo.lasthiti_odd, /**/ dplane, dcell /**/ );
 
   if(dist > MaxDistInCells) return -1;
 
@@ -478,6 +504,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%d ", tinfo.true_pdg);
   fprintf(OUT, "%d ", tinfo.true_nucc);
   fprintf(OUT, "%d ", tinfo.true_atom_cap);
+  fprintf(OUT, "%f %f ", cluster.cosx, cluster.cosy);
 
 
   fprintf(OUT, "%d ", cluster.type);
@@ -581,11 +608,44 @@ struct printinfo{
   cluster clu;
 };
 
+static float make_cosine(const int nhit, const float tend_dz,
+                         const float tend_dw, float dz, float dw)
+{
+  if(nhit == 0) return -2;
+
+  dz /= nhit;
+  dw /= nhit;
+
+  // clu_mag can be zero if the hits are all exactly at the track end.
+  const double clu_mag = sqrt(pow(dz, 2) + pow(dw, 2));
+  if(clu_mag == 0) return -2;
+
+  // The track direction is a unit vector in 3D, but we need the
+  // magnitude in each view. track_mag should probably not be zero, but
+  // probably is for extremely short tracks or something.
+  const double track_mag = sqrt(pow(tend_dw, 2) + pow(tend_dz, 2));
+  if(track_mag == 0) return -2;
+
+  return (dz * tend_dz + dw * tend_dw)/track_mag/clu_mag;
+}
+
+// Given a cluster that has undivided x_dz, etc, produce the cosx and
+// cosy variables.
+static void make_cosines(cluster & __restrict__ clu,
+                         const trkinfo & __restrict__ tinfo)
+{
+  clu.cosx = make_cosine(clu.nhitx, tinfo.end_dz,tinfo.end_dx, clu.x_dz,clu.dx);
+  clu.cosy = make_cosine(clu.nhity, tinfo.end_dz,tinfo.end_dy, clu.y_dz,clu.dy);
+}
+
 static printinfo make_printinfo(const evtinfo & __restrict__ einfo_,
                                 const trkinfo & __restrict__ tinfo_,
-                                const cluster & __restrict__ clu_)
+                                      cluster & __restrict__ clu_)
 {
   printinfo ans;
+
+  make_cosines(clu_, tinfo_);
+
   ans.einfo = einfo_;
   ans.tinfo = tinfo_;
   ans.clu= clu_;
@@ -645,9 +705,23 @@ static void cluster_search(const int type,
     // Add everything to the cluster *after* the print of the
     // previous cluster (or no-op).
 
+    float dplane, dcell;
+
+    dist_trackend_to_cell(tinfo.trk, chit, tinfo.lasthiti_even,
+                          tinfo.lasthiti_odd, dplane, dcell);
+
     clu.nhit++;
-    if(chit.View() == geo::kX) clu.nhitx++;
-    else                       clu.nhity++;
+    if(chit.View() == geo::kX){
+      clu.nhitx++;
+      clu.x_dz += dplane;
+      clu.dx   += dcell;
+    }
+    else{
+      clu.nhity++;
+      clu.y_dz += dplane;
+      clu.dy   += dcell;
+    }
+
     if(chit.PE() > 35.0){
       clu.nhitover35pe++;
       if(chit.View() == geo::kX) clu.nhitover35pex++;
@@ -781,6 +855,8 @@ static void ntuple_header(const art::Event & evt)
       "true_pdg/I:"
       "true_nucc/I:"
       "true_atom_cap/I:"
+      "cosx/F:"
+      "cosy/F:"
 
       "type/I:"
       "t/F:"
@@ -1041,6 +1117,9 @@ void PostMuon::analyze(const art::Event& evt)
     tinfo.ex = needs_flip? trk.Start().X(): trk.Stop ().X();
     tinfo.ey = needs_flip? trk.Start().Y(): trk.Stop ().Y();
     tinfo.ez = needs_flip? trk.Start().Z(): trk.Stop ().Z();
+    tinfo.end_dx = trk.StopDir().X();
+    tinfo.end_dy = trk.StopDir().Y();
+    tinfo.end_dz = trk.StopDir().Z();
 
     // It's a waste of time to search for clusters around tracks that almost
     // certainly represent exiters.  Note that this does almost nothing to near

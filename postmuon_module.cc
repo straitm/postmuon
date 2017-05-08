@@ -288,6 +288,18 @@ static bool hit_in_any_track(const rb::CellHit & chit,
   return false;
 }
 
+/* Returns true if this cell hit is in this track. */
+static bool hit_in_track(const rb::CellHit & chit,
+                         const rb::Track & trk)
+{
+  for(unsigned int i = 0; i < trk.NCell(); i++){
+    const rb::CellHit & trk_chit = *(trk.Cell(i));
+
+    if(trk_chit == chit) return true;
+  }
+  return false;
+}
+
 /*
   Returns true if we need to reverse a track based on the assumed
   direction (down or north).
@@ -599,8 +611,10 @@ track, or brems, or x-rays from muon atomic capture, or whatever else.
 xt: Same as ex, but without hits that are part of any tracks, in an attempt to
 beat down uncorrelated background (doesn't seem to have much effect --
 maybe 5-10%.)
+
+x: Without any hits from the track.
 */
-enum clustertype { all, ex, ex2, xt };
+enum clustertype { all, ex, ex2, xt, x };
 
 struct printinfo{
   evtinfo einfo;
@@ -685,6 +699,8 @@ static void cluster_search(const int type,
        (type == ex2&&hit_in_track_coincident_module(chit, tinfo, sorted_hits))
        ||
        (type == xt &&hit_in_any_track(chit, trkhits))
+       ||
+       (type == x  &&hit_in_track(chit, tinfo.trk))
       )
       continue;
 
@@ -1144,6 +1160,7 @@ void PostMuon::analyze(const art::Event& evt)
     cluster_search(ex,  einfo, sorted_hits, trkhits, tinfo);
     cluster_search(ex2, einfo, sorted_hits, trkhits, tinfo);
     cluster_search(xt,  einfo, sorted_hits, trkhits, tinfo);
+    cluster_search(x,   einfo, sorted_hits, trkhits, tinfo);
   }
 }
 

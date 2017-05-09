@@ -4,6 +4,7 @@
 #include "BackTracker.fcl"
 #include "KalmanTrack.fcl"
 #include "KalmanTrackMerge.fcl"
+#include "Metadata.fcl"
 
 process_name: PostMuonProcessFTW
 
@@ -40,12 +41,13 @@ physics:
 
  analyzers:
  {
+   metadata:         @local::standard_metadata
    postmuon:         @local::ndbeam_postmuon
  }
 
  reco: [ ]
 
- stream1: [ postmuon ]
+ stream1: [ metadata, postmuon ]
 
  #end_path are things that do not modify art::Event, includes analyzers and output modules. 
  #all items here can be run simultaneously

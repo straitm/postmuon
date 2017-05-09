@@ -31,6 +31,7 @@
 #include "art/Framework/Core/FindOneP.h"
 #include "Utilities/AssociationUtil.h"
 
+#include "Metadata/MetadataManager.h"
 
 #include "StandardRecord/StandardRecord.h"
 #include "MCCheater/BackTracker.h"
@@ -64,6 +65,7 @@ static double MaxDistInCells = 0.123456; // dummy as well
 struct evtinfo{
   int run;
   int subrun;
+  int cycle; // for ND MC - each cycle in a subrun reuses the same rock events
   int event;
   int nslc; // number of slices
   double triggerlength;
@@ -87,6 +89,7 @@ struct trkinfo{
   float sx, sy, sz, ex, ey, ez; // start and end position, after flip correction
   float end_dx, end_dy, end_dz; // ending direction
   double remid;
+  float mcweight;
 };
 
 struct cluster{
@@ -493,7 +496,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   const double ty = tinfo.ey;
   const double tz = tinfo.ez;
 
-  fprintf(OUT, "%d %d %d ", einfo.run, einfo.subrun, einfo.event);
+  fprintf(OUT, "%d %d %d %d ", einfo.run, einfo.subrun, einfo.cycle, einfo.event);
   fprintf(OUT, "%f ", sqrt(pow(tinfo.sx - tinfo.ex, 2)
                          + pow(tinfo.sy - tinfo.ey, 2)
                          + pow(tinfo.sz - tinfo.ez, 2)));
@@ -517,6 +520,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%d ", tinfo.true_nucc);
   fprintf(OUT, "%d ", tinfo.true_atom_cap);
   fprintf(OUT, "%f %f ", cluster.cosx, cluster.cosy);
+  fprintf(OUT, "%f ", tinfo.mcweight);
 
 
   fprintf(OUT, "%d ", cluster.type);
@@ -834,11 +838,11 @@ static bool delta_and_length(int64_t & event_length_tdc,
   return true; // ok
 }
 
-static void ntuple_header(const art::Event & evt)
+static void ntuple_header(const evtinfo & einfo)
 {
   if(OUT == NULL){
-    OUT = fopen(Form("postmuon_%d_%d.20170308.ntuple",
-                     evt.run(), evt.subRun()), "w");
+    OUT = fopen(Form("postmuon_%d_%d_%d.ntuple",
+                     einfo.run, einfo.subrun, einfo.cycle), "w");
     if(OUT == NULL){
        fprintf(stderr, "Could not open output ntuple file\n");
        exit(1);
@@ -846,6 +850,7 @@ static void ntuple_header(const art::Event & evt)
     fprintf(OUT,
       "run/I:"
       "subrun/I:"
+      "cycle/I:"
       "event/I:"
       "trklen/F:"
       "trk/I:"
@@ -873,6 +878,7 @@ static void ntuple_header(const art::Event & evt)
       "true_atom_cap/I:"
       "cosx/F:"
       "cosy/F:"
+      "mcweight/F:"
 
       "type/I:"
       "t/F:"
@@ -997,7 +1003,14 @@ void PostMuon::analyze(const art::Event& evt)
   art::FindOneP<caf::StandardRecord> slice2caf(slice, evt, "cafmaker");
   if(!slice2caf.isValid()) { puts("No slice2caf"); return; }
 
-  ntuple_header(evt);
+  evtinfo einfo;
+  einfo.run = evt.run();
+  einfo.subrun = evt.subRun();
+
+  std::map<std::string, std::string> metadata = meta::MetadataManager::getInstance().GetMetadata();
+  einfo.cycle = metadata.count("simulated.cycle")?std::stoi(metadata["simulated.cycle"]):0;
+
+  ntuple_header(einfo);
 
   if(rawtrigger->empty()) return;
   if(tracks    ->empty()) return;
@@ -1026,11 +1039,9 @@ void PostMuon::analyze(const art::Event& evt)
     delta_tdc = 224 * 64;
   }
 
-  evtinfo einfo;
   einfo.triggerlength = event_length_tdc * 1000. / TDC_PER_US;
   einfo.starttime = -(delta_tdc * 1000. / TDC_PER_US);
-  einfo.run = evt.run();
-  einfo.subrun = evt.subRun();
+
   einfo.event = evt.event();
   einfo.nslc = slice->size();
 
@@ -1054,7 +1065,13 @@ void PostMuon::analyze(const art::Event& evt)
 
     t.slice_energy = slice2numue.at(t.slice)->E();
 
-    t.contained_slice = containedND(slice2caf.at(t.slice));
+    const art::Ptr<caf::StandardRecord> sr = slice2caf.at(t.slice);
+
+    t.contained_slice = containedND(sr);
+
+    t.mcweight = sr->mc.nu.empty()?1:
+       (sr->mc.nu[0].rwgt.ppfx.cv *
+         (sr->mc.nu[0].inttype == simb::kMEC? 0.9: 1));
 
     t.true_pdg = t.true_nupdg = t.true_nucc = t.true_atom_cap = 0;
     if(!is_data){

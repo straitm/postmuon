@@ -350,6 +350,7 @@ static double cell_number_correction(const bool same_view,
 // Return the position in cell number including this offset.
 static double cell_coord_off(const int plane)
 {
+  // Same test for ND and FD.
   return (plane%2) == ((plane/2)%2)? -0.5: 0.0;
 }
 

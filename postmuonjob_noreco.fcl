@@ -4,6 +4,7 @@
 #include "BackTracker.fcl"
 #include "KalmanTrack.fcl"
 #include "KalmanTrackMerge.fcl"
+#include "Metadata.fcl"
 
 
 
@@ -44,12 +45,13 @@ physics:
 
  analyzers:
  {
+   metadata:         @local::standard_metadata
    postmuon:         @local::standard_postmuon
  }
 
  reco: [ ]
 
- stream1: [ postmuon, out1 ]
+ stream1: [ metadata, postmuon, out1 ]
 
  #end_path are things that do not modify art::Event, includes analyzers and output modules. 
  #all items here can be run simultaneously

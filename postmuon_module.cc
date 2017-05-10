@@ -996,13 +996,13 @@ void PostMuon::analyze(const art::Event& evt)
   //evt.getByLabel("windowtrack", tracks);
 
   art::FindOneP<remid::ReMId> track2remid(tracks, evt, "remid");
-  if(!track2remid.isValid()) { puts("No track2remid"); return; }
+  if(!track2remid.isValid()) { puts("No track2remid"); }
 
   art::FindOneP<numue::NumuE> slice2numue(slice, evt, "numue");
-  if(!slice2numue.isValid()) { puts("No slice2numue"); return; }
+  if(!slice2numue.isValid()) { puts("No slice2numue"); }
 
   art::FindOneP<caf::StandardRecord> slice2caf(slice, evt, "cafmaker");
-  if(!slice2caf.isValid()) { puts("No slice2caf"); return; }
+  if(!slice2caf.isValid()) { puts("No slice2caf"); }
 
   evtinfo einfo;
   einfo.run = evt.run();
@@ -1060,19 +1060,20 @@ void PostMuon::analyze(const art::Event& evt)
 
     trkinfo t;
     t.trk = (*tracks)[c];
-    t.remid = track2remid.at(c)->Value();
+    t.remid = track2remid.isValid()?track2remid.at(c)->Value():0;
 
     if(0 > (t.slice = which_slice_is_this_track_in(t, slice))) return;
 
-    t.slice_energy = slice2numue.at(t.slice)->E();
+    t.slice_energy = slice2numue.isValid()?slice2numue.at(t.slice)->E():0;
 
-    const art::Ptr<caf::StandardRecord> sr = slice2caf.at(t.slice);
+    if(slice2caf.isValid()){
+      const art::Ptr<caf::StandardRecord> sr = slice2caf.at(t.slice);
+      t.contained_slice = containedND(sr);
 
-    t.contained_slice = containedND(sr);
-
-    t.mcweight = sr->mc.nu.empty()?1:
-       (sr->mc.nu[0].rwgt.ppfx.cv *
-         (sr->mc.nu[0].inttype == simb::kMEC? 0.9: 1));
+      t.mcweight = sr->mc.nu.empty()?1:
+         (sr->mc.nu[0].rwgt.ppfx.cv *
+           (sr->mc.nu[0].inttype == simb::kMEC? 0.9: 1));
+    }
 
     t.true_pdg = t.true_nupdg = t.true_nucc = t.true_atom_cap = 0;
     if(!is_data){
@@ -1174,11 +1175,11 @@ void PostMuon::analyze(const art::Event& evt)
     last_hits(tinfo.lasthiti_even, tinfo.lasthiti_odd, trk);
     tinfo.time = mean_late_track_time(trk);
 
-    cluster_search(all, einfo, sorted_hits, trkhits, tinfo);
-    cluster_search(ex,  einfo, sorted_hits, trkhits, tinfo);
-    cluster_search(ex2, einfo, sorted_hits, trkhits, tinfo);
+    //cluster_search(all, einfo, sorted_hits, trkhits, tinfo);
+    //cluster_search(ex,  einfo, sorted_hits, trkhits, tinfo);
+    //cluster_search(ex2, einfo, sorted_hits, trkhits, tinfo);
     cluster_search(xt,  einfo, sorted_hits, trkhits, tinfo);
-    cluster_search(x,   einfo, sorted_hits, trkhits, tinfo);
+    //cluster_search(x,   einfo, sorted_hits, trkhits, tinfo);
   }
 }
 

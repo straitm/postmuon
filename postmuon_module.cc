@@ -373,8 +373,8 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
                                    const rb::CellHit & __restrict__ chit,
                                    const int lasthiti_even,
                                    const int lasthiti_odd,
-                                   float & dplane,
-                                   float & dcell)
+                                   float & __restrict__ dplane,
+                                   float & __restrict__ dcell)
 {
   const int last_tplane_even = trk.Cell(lasthiti_even)->Plane();
   const int last_tplane_odd  = trk.Cell(lasthiti_odd) ->Plane();
@@ -424,7 +424,7 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
   return a negative number if it is too far away.
 */
 static double hit_near_track(const trkinfo & __restrict__ tinfo,
-  const rb::CellHit & __restrict__ chit)
+                             const rb::CellHit & __restrict__ chit)
 {
   // Accept the hit even if it is in the track!  Because if a Michel
   // hit gets swept up into the track, this is the only way to see it.
@@ -432,6 +432,15 @@ static double hit_near_track(const trkinfo & __restrict__ tinfo,
   //
   // Accept the hit even if it is before the track!  Because this gets
   // us the background level in an unbiased way.
+
+  // Optimization by quickly rejecting hits by plane alone. Measured to
+  // substantially reduce time for FD SNEWS triggers (the worst case)
+  {
+    const int last_tplane_even = tinfo.trk.Cell(tinfo.lasthiti_even)->Plane();
+    const int last_tplane_odd  = tinfo.trk.Cell(tinfo.lasthiti_odd) ->Plane();
+    if(fabs(chit.Plane() - last_tplane_even)*planes_per_cell > MaxDistInCells &&
+       fabs(chit.Plane() - last_tplane_odd )*planes_per_cell > MaxDistInCells) return -1;
+  }
 
   float dplane, dcell; /* unused here */
 
@@ -693,6 +702,8 @@ static void cluster_search(const int type,
 
     if(dist < 0) continue;
 
+    // Don't try to optimize this out of the loop.  We have to recalibrate
+    // for each track end point.
     const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
        // If the hit is in X, it needs a Y plane to provide W
        chit.View() == geo::kX? tinfo.ey: tinfo.ex);
@@ -996,13 +1007,13 @@ void PostMuon::analyze(const art::Event& evt)
   //evt.getByLabel("windowtrack", tracks);
 
   art::FindOneP<remid::ReMId> track2remid(tracks, evt, "remid");
-  if(!track2remid.isValid()) { puts("No track2remid"); }
+  if(!track2remid.isValid()) { fputs("No track2remid\n", stderr); }
 
   art::FindOneP<numue::NumuE> slice2numue(slice, evt, "numue");
-  if(!slice2numue.isValid()) { puts("No slice2numue"); }
+  if(!slice2numue.isValid()) { fputs("No slice2numue\n", stderr); }
 
   art::FindOneP<caf::StandardRecord> slice2caf(slice, evt, "cafmaker");
-  if(!slice2caf.isValid()) { puts("No slice2caf"); }
+  if(!slice2caf.isValid()) { fputs("No slice2caf\n", stderr); }
 
   evtinfo einfo;
   einfo.run = evt.run();

@@ -1,0 +1,64 @@
+#include "postmuon.fcl"
+#include "services.fcl"
+#include "LiveGeometry.fcl"
+#include "BackTracker.fcl"
+#include "CalHit.fcl"
+#include "Slicer4D.fcl"
+#include "KalmanTrack.fcl"
+#include "KalmanTrackMerge.fcl"
+#include "Calibrator.fcl"
+#include "Metadata.fcl"
+
+process_name: PostMuonProcessFTW
+
+services:
+{
+  # Load the service that manages root files for histograms.
+  TFileService: { fileName: "histos.root"            }
+  scheduler:    { wantSummary: true }
+  message:      @local::standard_out
+  Calibrator:   @local::standard_calibrator
+  BackTracker:   @local::standard_backtracker
+  @table::standard_services
+}
+
+#Start each new event with an empty event.
+source:
+{
+  module_type: RootInput
+  maxEvents: -1
+}
+
+
+# Reduce max distance to keep output file size under control
+snews_postmuon: @local::standard_postmuon
+snews_postmuon.MaxDistInCells: 3.0
+
+# Define and configure some modules to do work on each event.
+# First modules are defined; they are scheduled later.
+# Modules are grouped by type.
+physics:
+{
+
+ producers:
+ {
+   calhit:           @local::standard_calhit
+   slicer:           @local::standard_slicer4d
+   kalmantrack:      @local::standard_kalmantrack
+   kalmantrackmerge: @local::standard_kalmantrackmerge
+ }
+
+ analyzers:
+ {
+   metadata:         @local::standard_metadata
+   postmuon:         @local::snews_postmuon
+ }
+
+ reco: [calhit, slicer, kalmantrack, kalmantrackmerge ]
+
+ stream1: [ metadata, postmuon ]
+
+ #end_path are things that do not modify art::Event, includes analyzers and output modules. 
+ #all items here can be run simultaneously
+ end_paths:     [ stream1 ]  
+}

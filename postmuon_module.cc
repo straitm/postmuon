@@ -83,6 +83,7 @@ struct trkinfo{
   int true_pdg; // True PDG code of particle making this track, or 0 for data
   int true_nucc; // 1 if this slice is MC and true CC, 0 otherwise
   int true_atom_cap; // 1 if this is a mu-, pi- or K- that stops, else 0
+  int true_neutrons; // Number of true neutron daughters
   bool primary_in_slice; // Is this the longest track in the slice?
   double time;
   int lasthiti_even, lasthiti_odd;
@@ -529,6 +530,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%d ", tinfo.true_pdg);
   fprintf(OUT, "%d ", tinfo.true_nucc);
   fprintf(OUT, "%d ", tinfo.true_atom_cap);
+  fprintf(OUT, "%d ", tinfo.true_neutrons);
   fprintf(OUT, "%f %f ", cluster.cosx, cluster.cosy);
   fprintf(OUT, "%f ", tinfo.mcweight);
 
@@ -888,6 +890,7 @@ static void ntuple_header(const evtinfo & einfo)
       "true_pdg/I:"
       "true_nucc/I:"
       "true_atom_cap/I:"
+      "true_neutrons/I:"
       "cosx/F:"
       "cosy/F:"
       "mcweight/F:"
@@ -1083,10 +1086,13 @@ void PostMuon::analyze(const art::Event& evt)
 
       t.mcweight = sr->mc.nu.empty()?1:
          (sr->mc.nu[0].rwgt.ppfx.cv *
+           // I heard on Slack that this was the right formula for Xsec
+           // weights.
            (sr->mc.nu[0].inttype == simb::kMEC? 0.9: 1));
     }
 
-    t.true_pdg = t.true_nupdg = t.true_nucc = t.true_atom_cap = 0;
+    t.true_pdg = t.true_nupdg = t.true_nucc = t.true_atom_cap
+      = t.true_neutrons = 0;
     if(!is_data){
       // Horrible. I cannot figure out how to mash what I have into
       // any of the acceptable types for SliceToNeutrinoInteractions
@@ -1133,11 +1139,34 @@ void PostMuon::analyze(const art::Event& evt)
 
           if(it == pnav.end()) continue;
 
+          // Count neutrons produced sensibly close to the end of
+          // the track, i.e. attempt to avoid counting neutrons
+          // produced in some inelastic scatter far away, because we
+          // won't pick those up in data. Otherwise, we find many
+          // seemingly-mysterious cases of mu+ making neutrons. I use a
+          // mix of reconstructed and true information here because I'm
+          // not sure I can reliably get the position that a particle
+          // ends. See above comments on EndE(). Also, in data I will be
+          // searching around the ends of reconstructed tracks, not true
+          // ones, so probably this is the better definition anyway.
+          t.true_neutrons += (
+            it->second->PdgCode() == 2112 &&
+            sqrt(pow( (*tracks)[c].Stop().X() - it->second->Position().X(), 2) +
+                 pow( (*tracks)[c].Stop().Y() - it->second->Position().Y(), 2) +
+                 pow( (*tracks)[c].Stop().Z() - it->second->Position().Z(), 2)) < 20.0
+          );
+
           const std::string dproc = it->second->Process();
           if(dproc == "muMinusCaptureAtRest" ||
              dproc == "hBertiniCaptureAtRest"){
             t.true_atom_cap = 1;
-            break;
+          }
+          else if(dproc == "Decay"){
+            // I'm thinking of stuffing "it decayed" into the same
+            // variable because decay is like "really really didn't
+            // capture". Just will have to be careful to test for
+            // specific values and not treat as boolean.
+            t.true_atom_cap = -1;
           }
         }
       }

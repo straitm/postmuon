@@ -1006,7 +1006,12 @@ void PostMuon::analyze(const art::Event& evt)
   art::Handle< std::vector<rb::Track> > tracks;
   evt.getByLabel("kalmantrackmerge", tracks);
 
-  // works better for cosmics (bizzarely), but has no remid
+  // works better for cosmics (bizzarely), and also at connecting the last
+  // bend of a pion track, but has no remid
+  //
+  // Could get both kalman and window, use the window end point, and then
+  // find the kalman track that shared the most hits and use that remid
+  // score.  Errigiifhfhhhghghgggg.
   //evt.getByLabel("windowtrack", tracks);
 
   art::FindOneP<remid::ReMId> track2remid(tracks, evt, "remid");
@@ -1124,50 +1129,50 @@ void PostMuon::analyze(const art::Event& evt)
         ->HitsToParticle(trackhits);
 
       // Can be empty if all the hits are noise
-      if(!particles.empty()){
-        t.true_pdg = particles[0]->PdgCode();
+      if(particles.empty()) continue;
 
-        // As of 2017-05-03, sim::Particle::EndE() seems to always
-        // return the particle's mass, no matter what happens to it.
-        // sim::Particle::EndProcess() is also not useful for finding
-        // out whether a particle has stopped, since it always holds an
-        // empty string. So to find out what happens to a particle, you
-        // have to laboriously look at its daughters...
-        for(int d = 0; d < particles[0]->NumberDaughters(); d++){
-          sim::ParticleNavigator::const_iterator it =
-            pnav.find(particles[0]->Daughter(d));
+      t.true_pdg = particles[0]->PdgCode();
 
-          if(it == pnav.end()) continue;
+      // As of 2017-05-03, sim::Particle::EndE() seems to always
+      // return the particle's mass, no matter what happens to it.
+      // sim::Particle::EndProcess() is also not useful for finding out
+      // whether a particle has stopped, since it always holds an empty
+      // string. So to find out what happens to a particle, you have to
+      // laboriously look at its daughters...
+      for(int d = 0; d < particles[0]->NumberDaughters(); d++){
+        sim::ParticleNavigator::const_iterator it =
+          pnav.find(particles[0]->Daughter(d));
 
-          // Count neutrons produced sensibly close to the end of
-          // the track, i.e. attempt to avoid counting neutrons
-          // produced in some inelastic scatter far away, because we
-          // won't pick those up in data. Otherwise, we find many
-          // seemingly-mysterious cases of mu+ making neutrons. I use a
-          // mix of reconstructed and true information here because I'm
-          // not sure I can reliably get the position that a particle
-          // ends. See above comments on EndE(). Also, in data I will be
-          // searching around the ends of reconstructed tracks, not true
-          // ones, so probably this is the better definition anyway.
-          t.true_neutrons += (
-            it->second->PdgCode() == 2112 &&
-            sqrt(pow( (*tracks)[c].Stop().X() - it->second->Position().X(), 2) +
-                 pow( (*tracks)[c].Stop().Y() - it->second->Position().Y(), 2) +
-                 pow( (*tracks)[c].Stop().Z() - it->second->Position().Z(), 2)) < 20.0
-          );
+        if(it == pnav.end()) continue;
 
-          const std::string dproc = it->second->Process();
-          if(dproc == "muMinusCaptureAtRest" ||
-             dproc == "hBertiniCaptureAtRest"){
-            t.true_atom_cap = 1;
-          }
-          else if(dproc == "Decay"){
-            // I'm thinking of stuffing "it decayed" into the same
-            // variable because decay is like "really really didn't
-            // capture". Just will have to be careful to test for
-            // specific values and not treat as boolean.
-            t.true_atom_cap = -1;
-          }
+        // Count neutrons produced sensibly close to the end of the
+        // track, i.e. attempt to avoid counting neutrons produced in
+        // some inelastic scatter far away, because we won't pick those
+        // up in data. Otherwise, we find many seemingly-mysterious
+        // cases of mu+ making neutrons. I use a mix of reconstructed
+        // and true information here because I'm not sure I can reliably
+        // get the position that a particle ends. See above comments on
+        // EndE(). Also, in data I will be searching around the ends of
+        // reconstructed tracks, not true ones, so probably this is the
+        // better definition anyway.
+        t.true_neutrons += (
+          it->second->PdgCode() == 2112 &&
+          sqrt(pow( (*tracks)[c].Stop().X() - it->second->Position().X(), 2) +
+               pow( (*tracks)[c].Stop().Y() - it->second->Position().Y(), 2) +
+               pow( (*tracks)[c].Stop().Z() - it->second->Position().Z(), 2)) < 20.0
+        );
+
+        const std::string dproc = it->second->Process();
+        if(dproc == "muMinusCaptureAtRest" ||
+           dproc == "hBertiniCaptureAtRest"){
+          t.true_atom_cap = 1;
+        }
+        else if(dproc == "Decay"){
+          // I'm stuffing "it decayed" into the same variable because
+          // decay is like "really really didn't capture". Just will
+          // have to be careful to test for specific values and not
+          // treat as boolean.
+          t.true_atom_cap = -1;
         }
       }
     }

@@ -56,6 +56,9 @@
 
 #include <signal.h>
 
+#include "TRandom3.h"
+static TRandom3 rand_stamp(0);
+
 static FILE * OUT = NULL;
 static int NhitTrackTimeAveraging = 1; // to be overwritten in PostMuon()
 static bool TracksAreDown = true; // to be overwritten in PostMuon()
@@ -82,20 +85,26 @@ struct trkinfo{
   int true_nupdg; // True PDG code of neutrino making this slice, or 0 for data
   int true_pdg; // True PDG code of particle making this track, or 0 for data
   int true_nucc; // 1 if this slice is MC and true CC, 0 otherwise
+  int true_nuint; // Interaction type: 0 = QE, 1 = Res... , -1 otherwise
   int true_atom_cap; // 1 if this is a mu-, pi- or K- that stops, else 0
   int true_neutrons; // Number of true neutron daughters
-  bool primary_in_slice; // Is this the longest track in the slice?
+  bool primary_in_slice; // Is this the highest remid track in the slice?
   double time;
-  int lasthiti_even, lasthiti_odd;
+  int last_plane_even; // plane number -- need to cache these for offspace
+  int last_plane_odd; // plane number  -- sample because the cells are no
+  int last_cell_even; // cell number   -- longer accessible once we move
+  int last_cell_odd; // cell number    -- to the next spill.
   float sx, sy, sz, ex, ey, ez; // start and end position, after flip correction
   float end_dx, end_dy, end_dz; // ending direction
   double remid;
   float mcweight;
+  float dother; // Distance in cells to nearest other slice
 };
 
 struct cluster{
   int i; // which cluster for the given track
   int type; // defines the set of cuts used for this cluster
+  int offspace; // 1 if this is an off-space background sample
   float first_accepted_time; // time of the first hit in the cluster
   float last_accepted_time; // time of the last hit in the cluster
   float mindist;  // minimum hit distance from track end
@@ -126,6 +135,12 @@ struct cluster{
               // has some density weighting, but rb::Track's direction
               // for the track, which is in plain old space.
 };
+
+// Circular buffers of tracks from previous spills which can be used to
+// provide unbiased off-space samples from which to measure pileup.
+const int MAXSAVEDTRACKTYPE = 2*2*2;
+static std::deque<trkinfo> offspacetrk[MAXSAVEDTRACKTYPE];
+const unsigned int savedtrack_size = 1024;
 
 const float INVALID_TIME = -1000000;
 
@@ -161,6 +176,7 @@ static cluster mkcluster()
   resetcluster(res);
   res.i = 0;
   res.type = 0;
+  res.offspace = 0;
   return res;
 }
 
@@ -370,23 +386,16 @@ static int n_extrusions_boundaries_crossed(const int cell1,
   end of the track and the hit.  lasthiti_{even,odd} are the indices
   of the last hits in each view.
 */
-static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
+static float dist_trackend_to_cell(const trkinfo & __restrict__ tinfo,
                                    const rb::CellHit & __restrict__ chit,
-                                   const int lasthiti_even,
-                                   const int lasthiti_odd,
                                    float & __restrict__ dplane,
                                    float & __restrict__ dcell)
 {
-  const int last_tplane_even = trk.Cell(lasthiti_even)->Plane();
-  const int last_tplane_odd  = trk.Cell(lasthiti_odd) ->Plane();
-  const int last_tcell_even  = trk.Cell(lasthiti_even)->Cell();
-  const int last_tcell_odd   = trk.Cell(lasthiti_odd) ->Cell();
-
-  const bool increasing_z = is_increasing_z(trk);
+  const bool increasing_z = is_increasing_z(tinfo.trk);
 
   const int lastplane = increasing_z?
-                        std::max(last_tplane_even, last_tplane_odd)
-                        :std::min(last_tplane_even, last_tplane_odd);
+                        std::max(tinfo.last_plane_even, tinfo.last_plane_odd)
+                        :std::min(tinfo.last_plane_even, tinfo.last_plane_odd);
 
   const double hit_cc = chit.Cell() + cell_coord_off(chit.Plane());
 
@@ -394,12 +403,13 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
   // with a number of events of different cases in the event display.
 
   const double track_cc =
-    (chit.Plane()%2 == 0? last_tcell_even: last_tcell_odd)
+    (chit.Plane()%2 == 0? tinfo.last_cell_even: tinfo.last_cell_odd)
 
     + cell_number_correction(chit.Plane()%2 == lastplane%2,
-                             chit.View() == geo::kX, trk)
+                             chit.View() == geo::kX, tinfo.trk)
 
-    + cell_coord_off(chit.Plane()%2 == 0?last_tplane_even :last_tplane_odd);
+    + cell_coord_off(chit.Plane()%2 == 0?tinfo.last_plane_even:
+                                         tinfo.last_plane_odd);
 
   /*                scint length  & density, PVC length & density
     standardcell = 3.5565 * 1.005 * 0.8530 + 0.368      *  1.49
@@ -412,12 +422,32 @@ static float dist_trackend_to_cell(const rb::Track & __restrict__ trk,
   */
   const double addition_for_extrusion_boundaries =
     0.235 * n_extrusions_boundaries_crossed(chit.Cell(),
-              (chit.Plane()%2 == 0? last_tcell_even: last_tcell_odd));
+              (chit.Plane()%2 == 0? tinfo.last_cell_even: tinfo.last_cell_odd));
 
   dplane = planes_per_cell*(chit.Plane() - lastplane);
   dcell = addition_for_extrusion_boundaries + hit_cc - track_cc;
 
   return sqrt(pow(dplane, 2) + pow(dcell, 2));
+}
+
+static float make_dother(const trkinfo & __restrict__ tinfo,
+  const art::Handle< std::vector<rb::Cluster> > & __restrict__ slice)
+{
+  float mindist = 10000;
+  // start at 1 so as not to get the noise slice
+  for(unsigned int i = 1; i < slice->size(); i++){
+    // Don't search in the track's own slice
+    if(tinfo.slice == (int)i) continue;
+
+    for(unsigned int j = 0; j < (*slice)[i].NCell(); j++){
+      float dplane, dcell; // unused
+      const float dist = dist_trackend_to_cell(tinfo, *(*slice)[i].Cell(j),
+        dplane, dcell);
+      if(dist < mindist) mindist = dist;
+      if(dist == 0) return 0; // optimization
+    }
+  }
+  return mindist;
 }
 
 /*
@@ -436,17 +466,14 @@ static double hit_near_track(const trkinfo & __restrict__ tinfo,
 
   // Optimization by quickly rejecting hits by plane alone. Measured to
   // substantially reduce time for FD SNEWS triggers (the worst case)
-  {
-    const int last_tplane_even = tinfo.trk.Cell(tinfo.lasthiti_even)->Plane();
-    const int last_tplane_odd  = tinfo.trk.Cell(tinfo.lasthiti_odd) ->Plane();
-    if(fabs(chit.Plane() - last_tplane_even)*planes_per_cell > MaxDistInCells &&
-       fabs(chit.Plane() - last_tplane_odd )*planes_per_cell > MaxDistInCells) return -1;
-  }
+  if( fabs(chit.Plane()-tinfo.last_plane_even)*planes_per_cell > MaxDistInCells
+   && fabs(chit.Plane()-tinfo.last_plane_odd )*planes_per_cell > MaxDistInCells)
+    return -1;
 
   float dplane, dcell; /* unused here */
 
-  const double dist = dist_trackend_to_cell(tinfo.trk, chit,
-    tinfo.lasthiti_even, tinfo.lasthiti_odd, /**/ dplane, dcell /**/ );
+  const double dist = dist_trackend_to_cell(tinfo, chit,
+    /**/ dplane, dcell /**/ );
 
   if(dist > MaxDistInCells) return -1;
 
@@ -507,10 +534,8 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   const double ty = tinfo.ey;
   const double tz = tinfo.ez;
 
-  fprintf(OUT, "%d %d %d %d ", einfo.run, einfo.subrun, einfo.cycle, einfo.event);
-  fprintf(OUT, "%f ", sqrt(pow(tinfo.sx - tinfo.ex, 2)
-                         + pow(tinfo.sy - tinfo.ey, 2)
-                         + pow(tinfo.sz - tinfo.ez, 2)));
+  fprintf(OUT, "%d %d %d %d ", einfo.run,einfo.subrun,einfo.cycle,einfo.event);
+  fprintf(OUT, "%f ", tinfo.trk.TotalLength());
   fprintf(OUT, "%d ", tinfo.i);
   fprintf(OUT, "%d ", tinfo.ntrk);
   fprintf(OUT, "%.1f ", einfo.triggerlength/1000);
@@ -529,17 +554,19 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%d ", tinfo.true_nupdg);
   fprintf(OUT, "%d ", tinfo.true_pdg);
   fprintf(OUT, "%d ", tinfo.true_nucc);
+  fprintf(OUT, "%d ", tinfo.true_nuint);
   fprintf(OUT, "%d ", tinfo.true_atom_cap);
   fprintf(OUT, "%d ", tinfo.true_neutrons);
   fprintf(OUT, "%f %f ", cluster.cosx, cluster.cosy);
   fprintf(OUT, "%f ", tinfo.mcweight);
-
+  fprintf(OUT, "%f ", tinfo.dother);
 
   fprintf(OUT, "%d ", cluster.type);
 
+  const float tim = (float(cluster.tsum)/cluster.nhit-tinfo.time)/1000;
+
   if(cluster.nhit)
-    fprintf(OUT, "%f ",
-            (float(cluster.tsum)/cluster.nhit-tinfo.time)/1000);
+    fprintf(OUT, "%f ", tim);
   else
     fprintf(OUT, "-1 ");
 
@@ -682,25 +709,55 @@ static printinfo make_printinfo(const evtinfo & __restrict__ einfo_,
   return ans;
 }
 
+static int which_saved_track_array(const trkinfo & real_tinfo)
+{
+  return real_tinfo.primary_in_slice * 0x1
+       + real_tinfo.contained_slice  * 0x2
+       + (real_tinfo.ez > 1300)      * 0x4;
+}
+
+// Return a saved track of the same sort that this track is.
+// if no tracks of that sort have been saved yet, return NULL.
+static trkinfo * select_offspace_track(const trkinfo & real_tinfo)
+{
+  const int which = which_saved_track_array(real_tinfo);
+
+  if(offspacetrk[which].empty()) return NULL;
+
+  // Is using my own TRandom3 the right thing to do?
+  const int i = rand_stamp.Integer(offspacetrk[which].size());
+
+  return & offspacetrk[which][i];
+}
+
 static void cluster_search(const int type,
+  const bool offspace,
   const evtinfo & __restrict__ einfo,
   const std::vector<rb::CellHit> & __restrict__ sorted_hits,
   const std::vector<rb::CellHit> & __restrict__ trkhits,
-  const trkinfo & __restrict__ tinfo)
+  const trkinfo & __restrict__ real_tinfo)
 {
   art::ServiceHandle<calib::Calibrator> calthing;
 
   cluster clu = mkcluster();
   clu.i = 0;
-  clu.type = type;
-  clu.previous_cluster_t = tinfo.time;
+
+  // So, e.g. type 3 is xt and type 13 is the xt off-space sample
+  // Avoids accidentially selecting both together.
+  clu.type = type + 10*offspace;
+
+  const trkinfo * tinfo = &real_tinfo;
+  if(offspace) tinfo = select_offspace_track(real_tinfo);
+  if(tinfo == NULL) return;
+
+  clu.previous_cluster_t = tinfo->time;
 
   std::vector<printinfo> toprint;
 
   for(unsigned int c = 0; c < sorted_hits.size(); c++){
     const rb::CellHit & chit = sorted_hits[c];
 
-    const double dist = hit_near_track(tinfo, chit);
+    const double dist = hit_near_track(*tinfo, chit);
 
     if(dist < 0) continue;
 
@@ -708,17 +765,17 @@ static void cluster_search(const int type,
     // for each track end point.
     const rb::RecoHit rhit = calthing->MakeRecoHit(chit,
        // If the hit is in X, it needs a Y plane to provide W
-       chit.View() == geo::kX? tinfo.ey: tinfo.ex);
+       chit.View() == geo::kX? tinfo->ey: tinfo->ex);
 
     if(!rhit.IsCalibrated()
        ||
-       (type == ex &&hit_in_track_module(chit, tinfo.trk))
+       (type == ex &&hit_in_track_module(chit, tinfo->trk))
        ||
-       (type == ex2&&hit_in_track_coincident_module(chit, tinfo, sorted_hits))
+       (type == ex2&&hit_in_track_coincident_module(chit, *tinfo, sorted_hits))
        ||
        (type == xt &&hit_in_any_track(chit, trkhits))
        ||
-       (type == x  &&hit_in_track(chit, tinfo.trk))
+       (type == x  &&hit_in_track(chit, tinfo->trk))
       )
       continue;
 
@@ -729,7 +786,7 @@ static void cluster_search(const int type,
     const bool newcluster = chit.TNS() > clu.last_accepted_time + 500.0;
 
     if(newcluster && clu.nhit){
-      toprint.push_back(make_printinfo(einfo, tinfo, clu));
+      toprint.push_back(make_printinfo(einfo, *tinfo, clu));
       clu.i++;
       const float thistime = float(clu.tsum)/clu.nhit;
       resetcluster(clu);
@@ -741,8 +798,7 @@ static void cluster_search(const int type,
 
     float dplane, dcell;
 
-    dist_trackend_to_cell(tinfo.trk, chit, tinfo.lasthiti_even,
-                          tinfo.lasthiti_odd, dplane, dcell);
+    dist_trackend_to_cell(*tinfo, chit, dplane, dcell);
 
     clu.nhit++;
     if(chit.View() == geo::kX){
@@ -776,8 +832,10 @@ static void cluster_search(const int type,
     clu.adcsum += chit.ADC();
   }
 
-  // print last cluster, or track info if no cluster
-  toprint.push_back(make_printinfo(einfo, tinfo, clu));
+  // Print last cluster, or track info if no cluster. But only print clusters
+  // for off-space, since we already have track info from the on-space sample.
+  if(clu.nhit > 0 || !offspace)
+    toprint.push_back(make_printinfo(einfo, *tinfo, clu));
   for(unsigned int i = 0; i < toprint.size(); i++)
     print_ntuple_line(toprint[i].einfo,
                       toprint[i].tinfo,
@@ -889,11 +947,13 @@ static void ntuple_header(const evtinfo & einfo)
       "true_nupdg/I:"
       "true_pdg/I:"
       "true_nucc/I:"
+      "true_nuint/I:"
       "true_atom_cap/I:"
       "true_neutrons/I:"
       "cosx/F:"
       "cosy/F:"
       "mcweight/F:"
+      "dother/F:"
 
       "type/I:"
       "t/F:"
@@ -926,9 +986,8 @@ static int which_slice_is_this_track_in(
   const art::Ptr<rb::CellHit> ahit =
     t.trk.Cell(0); // some random hit on the track
 
-  // Could probably skip slice 0 since it is the noise slice, but let's not
-  // in case that convention changes.
-  for(unsigned int i = 0; i < slice->size(); i++){
+  // Skip slice 0 since it is the noise slice
+  for(unsigned int i = 1; i < slice->size(); i++){
     const rb::Cluster & slc = (*slice)[i];
     for(unsigned int j = 0; j < slc.NCell(); j++){
       const art::Ptr<rb::CellHit> shit = slc.Cell(j);
@@ -943,7 +1002,7 @@ static int which_slice_is_this_track_in(
 static void fill_primary_track_info(std::vector<trkinfo> & ts, const int nslc)
 {
   // For each slice...
-  for(int i = 0; i < nslc; i++){
+  for(int i = 1 /* sic */; i < nslc; i++){
     double maxremid = -1e40;
     unsigned int best = 0;
     // ... find the best track
@@ -1027,8 +1086,10 @@ void PostMuon::analyze(const art::Event& evt)
   einfo.run = evt.run();
   einfo.subrun = evt.subRun();
 
-  std::map<std::string, std::string> metadata = meta::MetadataManager::getInstance().GetMetadata();
-  einfo.cycle = metadata.count("simulated.cycle")?std::stoi(metadata["simulated.cycle"]):0;
+  std::map<std::string, std::string> metadata =
+    meta::MetadataManager::getInstance().GetMetadata();
+  einfo.cycle =
+    metadata.count("simulated.cycle")?std::stoi(metadata["simulated.cycle"]):0;
 
   ntuple_header(einfo);
 
@@ -1098,6 +1159,7 @@ void PostMuon::analyze(const art::Event& evt)
 
     t.true_pdg = t.true_nupdg = t.true_nucc = t.true_atom_cap
       = t.true_neutrons = 0;
+    t.true_nuint = -1;
     if(!is_data){
       // Horrible. I cannot figure out how to mash what I have into
       // any of the acceptable types for SliceToNeutrinoInteractions
@@ -1112,6 +1174,7 @@ void PostMuon::analyze(const art::Event& evt)
       if(!truths.empty()){
         t.true_nupdg = truths[0].neutrinoInt->GetNeutrino().Nu().PdgCode();
         t.true_nucc  = !truths[0].neutrinoInt->GetNeutrino().CCNC();
+        t.true_nuint = truths[0].neutrinoInt->GetNeutrino().Mode();
       }
 
       // Ditto above complaint. If there's a way to directly pass a
@@ -1157,9 +1220,9 @@ void PostMuon::analyze(const art::Event& evt)
         // better definition anyway.
         t.true_neutrons += (
           it->second->PdgCode() == 2112 &&
-          sqrt(pow( (*tracks)[c].Stop().X() - it->second->Position().X(), 2) +
-               pow( (*tracks)[c].Stop().Y() - it->second->Position().Y(), 2) +
-               pow( (*tracks)[c].Stop().Z() - it->second->Position().Z(), 2)) < 20.0
+          sqrt(pow((*tracks)[c].Stop().X() - it->second->Position().X(), 2) +
+            pow((*tracks)[c].Stop().Y() - it->second->Position().Y(), 2) +
+            pow((*tracks)[c].Stop().Z() - it->second->Position().Z(), 2)) < 20.0
         );
 
         const std::string dproc = it->second->Process();
@@ -1216,16 +1279,32 @@ void PostMuon::analyze(const art::Event& evt)
     tinfo.i = t;
     tinfo.ntrk = sorted_tracks.size();
     tinfo.remid = sorted_tracks[t].remid;
-    tinfo.lasthiti_even = 0, tinfo.lasthiti_odd = 0;
-    last_hits(tinfo.lasthiti_even, tinfo.lasthiti_odd, trk);
+    int lasthiti_even = 0, lasthiti_odd = 0;
+    last_hits(lasthiti_even, lasthiti_odd, trk);
+    tinfo.last_plane_even = trk.Cell(lasthiti_even)->Plane();
+    tinfo.last_plane_odd  = trk.Cell(lasthiti_odd) ->Plane();
+    tinfo.last_cell_even  = trk.Cell(lasthiti_even)->Cell();
+    tinfo.last_cell_odd   = trk.Cell(lasthiti_odd) ->Cell();
     tinfo.time = mean_late_track_time(trk);
+    tinfo.dother = make_dother(tinfo, slice);
 
     //cluster_search(all, einfo, sorted_hits, trkhits, tinfo);
     //cluster_search(ex,  einfo, sorted_hits, trkhits, tinfo);
     //cluster_search(ex2, einfo, sorted_hits, trkhits, tinfo);
-    cluster_search(xt,  einfo, sorted_hits, trkhits, tinfo);
+    cluster_search(xt,  false, einfo, sorted_hits, trkhits, tinfo);
+    for(int O = 0; O < 1; O++)
+      cluster_search(xt,  true,  einfo, sorted_hits, trkhits, tinfo);
     //cluster_search(x,   einfo, sorted_hits, trkhits, tinfo);
   }
+
+  // if(neardet) // how do you test this?
+  for(unsigned int t = 0; t < sorted_tracks.size(); t++){
+    const int which = which_saved_track_array(sorted_tracks[t]);
+    offspacetrk[which].push_back(sorted_tracks[t]);
+  }
+  for(unsigned int j = 0; j < MAXSAVEDTRACKTYPE; j++)
+    while(offspacetrk[j].size() > savedtrack_size)
+      offspacetrk[j].pop_front();
 }
 
 DEFINE_ART_MODULE(PostMuon);

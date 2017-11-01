@@ -51,6 +51,9 @@
 
 #include "GeometryObjects/PlaneGeo.h"
 
+#include <IFDH_service.h>
+#include "SummaryData/SpillData.h"
+
 #include <string>
 #include <algorithm>
 
@@ -71,6 +74,7 @@ struct evtinfo{
   int cycle; // for ND MC - each cycle in a subrun reuses the same rock events
   int event;
   int nslc; // number of slices
+  float pot; // Number of 1E12 pot
   double triggerlength;
   double starttime;
 };
@@ -535,6 +539,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   const double tz = tinfo.ez;
 
   fprintf(OUT, "%d %d %d %d ", einfo.run,einfo.subrun,einfo.cycle,einfo.event);
+  fprintf(OUT, "%f ", einfo.pot);
   fprintf(OUT, "%f ", tinfo.trk.TotalLength());
   fprintf(OUT, "%d ", tinfo.i);
   fprintf(OUT, "%d ", tinfo.ntrk);
@@ -924,6 +929,7 @@ static void ntuple_header(const evtinfo & einfo)
       "subrun/I:"
       "cycle/I:"
       "event/I:"
+      "pot/F:"
       "trklen/F:"
       "trk/I:"
       "ntrk/I:"
@@ -1043,6 +1049,21 @@ static bool containedND(const art::Ptr<caf::StandardRecord> sr)
   return a && b && c && d && e && f;
 }
 
+static float getpot(const art::Event & evt)
+{
+  // Try to get POT spill info if this is real data
+  art::Handle<sumdata::SpillData> spillPot;
+
+  if(!evt.isRealData()) return 0;
+
+  evt.getByLabel("ifdbspillinfo", spillPot);
+
+  if(spillPot.failedToGet()) return -1;
+
+  return spillPot->spillpot;
+}
+
+
 void PostMuon::analyze(const art::Event& evt)
 {
   // I'm so sorry that I have to do this.  And, my goodness, doing
@@ -1085,6 +1106,7 @@ void PostMuon::analyze(const art::Event& evt)
   evtinfo einfo;
   einfo.run = evt.run();
   einfo.subrun = evt.subRun();
+  einfo.pot = getpot(evt);
 
   std::map<std::string, std::string> metadata =
     meta::MetadataManager::getInstance().GetMetadata();

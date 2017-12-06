@@ -839,6 +839,7 @@ static void cluster_search(const int type,
 
   // Print last cluster, or track info if no cluster. But only print clusters
   // for off-space, since we already have track info from the on-space sample.
+  // Affects tag in stagehotelcurlknotgoat in analysis.
   if(clu.nhit > 0 || !offspace)
     toprint.push_back(make_printinfo(einfo, *tinfo, clu));
   for(unsigned int i = 0; i < toprint.size(); i++)
@@ -1029,8 +1030,12 @@ static void fill_primary_track_info(std::vector<trkinfo> & ts, const int nslc)
 // Return true iff this slice is numu-contained
 static bool containedND(const art::Ptr<caf::StandardRecord> sr)
 {
-  // Lifted from CAFAna/Cuts/NumuCuts.h, development 2017-03-28 I've
-  // removed the trk.kalman.tracks lines because they make it seg
+  // Lifted from CAFAna/Cuts/NumuCuts.h, development 2017-03-28
+  //
+  // XXX Should be cutting on goodspill or whatnot and also need
+  // to revisit the containment cuts for the latest analysis.
+  //
+  // I've removed the trk.kalman.tracks lines because they make it seg
   // fault, even if I check that the vector is not empty, why?! But
   // since I output the start and stop position anyway, and don't allow
   // tracks that include the muon catcher, track position checks are

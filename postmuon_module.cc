@@ -55,6 +55,7 @@
 #include "SummaryData/SpillData.h"
 
 #include <string>
+#include <set>
 #include <algorithm>
 
 #include <signal.h>
@@ -103,6 +104,40 @@ struct trkinfo{
   double remid;
   float mcweight;
   float dother; // Distance in cells to nearest other slice
+};
+
+// A light track that is just used to determine if we've seen this exact
+// same track before (because of DAQ problems).  It's enough to be sure
+// of uniqueness.
+struct unique_track{
+  unique_track(const trkinfo & in)
+  {
+    sx = in.sx;
+    sy = in.sy;
+    sz = in.sz;
+    ex = in.ex;
+    ey = in.ey;
+    ez = in.ez;
+    end_dx = in.end_dx;
+    end_dy = in.end_dy;
+    end_dz = in.end_dz;
+  }
+
+  bool operator <(const unique_track & b) const
+  {
+    if(sx != b.sx) return sx < b.sx;
+    if(sy != b.sy) return sy < b.sy;
+    if(sz != b.sz) return sz < b.sz;
+    if(ex != b.ex) return ex < b.ex;
+    if(ey != b.ey) return ey < b.ey;
+    if(ez != b.ez) return ez < b.ez;
+    if(end_dx != b.end_dx) return end_dx < b.end_dx;
+    if(end_dy != b.end_dy) return end_dy < b.end_dy;
+    return end_dz < b.end_dz;
+  }
+
+  float sx, sy, sz, ex, ey, ez; // start and end position, after flip correction
+  float end_dx, end_dy, end_dz; // ending direction
 };
 
 struct cluster{
@@ -1290,6 +1325,16 @@ void PostMuon::analyze(const art::Event& evt)
     tinfo.end_dx = trk.StopDir().X();
     tinfo.end_dy = trk.StopDir().Y();
     tinfo.end_dz = trk.StopDir().Z();
+
+    {
+      static std::set<unique_track> unique_tracks;
+      const std::pair<std::set<unique_track>::iterator, bool> does_it_blend =
+        unique_tracks.insert(sorted_tracks[t]);
+      if(!does_it_blend.second){ // true if the new track was inserted
+        printf("Seen exactly this track before.  Known DAQ problem.  Skipping\n");
+        continue;
+      }
+    }
 
     // It's a waste of time to search for clusters around tracks that almost
     // certainly represent exiters.  Note that this does almost nothing to near

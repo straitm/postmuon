@@ -691,7 +691,7 @@ sigma in the time resolution and should catch almost all hits that are
 prompt, either muon hits that didn't get reconstructed as part of the
 track, or brems, or x-rays from muon atomic capture, or whatever else.
 
-xt: Same as ex, but without hits that are part of any tracks, in an attempt to
+xt: Without hits that are part of any tracks, in an attempt to
 beat down uncorrelated background (doesn't seem to have much effect --
 maybe 5-10%.)
 

@@ -1086,29 +1086,40 @@ static bool goodspill(const art::Ptr<caf::StandardRecord> sr)
 // Return true iff this slice is numu-contained
 static bool containedND(const art::Ptr<caf::StandardRecord> sr)
 {
-  // Lifted from CAFAna/Cuts/NumuCuts.h, development 2017-03-28
-  //
-  // XXX Should be cutting on goodspill or whatnot and also need
-  // to revisit the containment cuts for the latest analysis.
-  //
-  // I've removed the trk.kalman.tracks lines because they make it seg
-  // fault, even if I check that the vector is not empty, why?! But
-  // since I output the start and stop position anyway, and don't allow
-  // tracks that include the muon catcher, track position checks are
-  // not really needed. Ditto for sr->energy.numu.ndhadcalcatE and
-  // ndhadcaltranE, which I found to be always nan. Alex R says "I think
-  // the calibration in development is still the one that's broken for
-  // the nd muon catcher." I don't need them since I disallow the muon
-  // catcher anyway.
-  const bool a = sr->trk.kalman.ntracks > sr->trk.kalman.idxremid,
-             b = sr->slc.ncellsfromedge > 1,
-             c = sr->slc.firstplane > 1,   // skip 0 and 1
-             d = sr->slc.lastplane  < 212, // skip 212 and 213
-             e = sr->sel.contain.kalfwdcellnd > 4,
-             f = sr->sel.contain.kalbakcellnd > 8;
+  // Lifted from CAFAna/Cuts/NumuCuts2017.h:kNumuContainND2017 on 2017-12-14.
+  if(sr->vtx.nelastic < 1) return false;
+  // reconstructed showers all contained
+  for(unsigned int i = 0; i < sr->vtx.elastic[0].fuzzyk.nshwlid; i++){
+    TVector3 start = sr->vtx.elastic[0].fuzzyk.png[i].shwlid.start;
+    TVector3 stop  = sr->vtx.elastic[0].fuzzyk.png[i].shwlid.stop;
+    if(std::min(start.X(), stop.X()) < -180.0) return false;
+    if(std::max(start.X(), stop.X()) >  180.0) return false;
+    if(std::min(start.Y(), stop.Y()) < -180.0) return false;
+    if(std::max(start.Y(), stop.Y()) >  180.0) return false;
+    if(std::min(start.Z(), stop.Z()) <   20.0) return false;
+    if(std::max(start.Z(), stop.Z()) > 1525.0) return false;
+  }
 
-  return a && b && c && d && e && f;
+  // only primary muon track present in muon catcher
+  if(sr->trk.kalman.ntracks < 1) return false;
+  for(unsigned int i = 0; i < sr->trk.kalman.ntracks; i++){
+    if(i == sr->trk.kalman.idxremid ) continue;
+    else if(sr->trk.kalman.tracks[i].start.Z() > 1275 ||
+            sr->trk.kalman.tracks[i].stop.Z()  > 1275)
+      return false;
+  }
+
+  return sr->trk.kalman.ntracks > sr->trk.kalman.idxremid
+         && sr->slc.firstplane > 1   // skip 0 and 1
+         && sr->slc.lastplane  < 212 // skip 212 and 213
+         && sr->trk.kalman.tracks[0].start.Z() < 1100
+         // vertex definitely outside mC
+         && ( sr->trk.kalman.tracks[0].stop.Z() < 1275
+              || sr->sel.contain.kalyposattrans < 55 ) // air gap
+         && sr->sel.contain.kalfwdcellnd > 5
+         && sr->sel.contain.kalbakcellnd > 10;
 }
+
 
 static float getpot(const art::Event & evt)
 {

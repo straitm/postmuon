@@ -102,6 +102,7 @@ struct trkinfo{
   float sx, sy, sz, ex, ey, ez; // start and end position, after flip correction
   float end_dx, end_dy, end_dz; // ending direction
   double remid;
+  double cvn;
   float mcweight;
   float dother; // Distance in cells to nearest other slice
 };
@@ -587,6 +588,7 @@ static void print_ntuple_line(const evtinfo & __restrict__ einfo,
   fprintf(OUT, "%f ", timeleft/1000);
   fprintf(OUT, "%f ", timeback/1000);
   fprintf(OUT, "%f ", tinfo.remid);
+  fprintf(OUT, "%f ", tinfo.cvn);
   fprintf(OUT, "%d ", tinfo.primary_in_slice);
   fprintf(OUT, "%f ", tinfo.slice_energy);
   fprintf(OUT, "%d ", einfo.nslc);
@@ -982,6 +984,7 @@ static void ntuple_header(const evtinfo & einfo)
       "timeleft/F:"
       "timeback/F:"
       "remid/F:"
+      "cvn/F:"
       "primary/I:"
       "slce/F:"
       "nslc/I:"
@@ -1211,6 +1214,7 @@ void PostMuon::analyze(const art::Event& evt)
     if(slice2caf.isValid()){
       const art::Ptr<caf::StandardRecord> sr = slice2caf.at(t.slice);
       t.contained_slice = containedND(sr);
+      t.cvn = sr->sel.cvn.numuid;
 
       t.mcweight = sr->mc.nu.empty()?1:
          (sr->mc.nu[0].rwgt.ppfx.cv *
@@ -1351,6 +1355,7 @@ void PostMuon::analyze(const art::Event& evt)
     tinfo.i = t;
     tinfo.ntrk = sorted_tracks.size();
     tinfo.remid = sorted_tracks[t].remid;
+    tinfo.cvn   = sorted_tracks[t].cvn;
     int lasthiti_even = 0, lasthiti_odd = 0;
     last_hits(lasthiti_even, lasthiti_odd, trk);
     tinfo.last_plane_even = trk.Cell(lasthiti_even)->Plane();

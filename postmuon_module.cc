@@ -1065,6 +1065,24 @@ static void fill_primary_track_info(std::vector<trkinfo> & ts, const int nslc)
   }
 }
 
+
+// Return true if the spill was good
+static bool goodspill(const art::Ptr<caf::StandardRecord> sr)
+{
+  // Only apply to NuMI triggers
+  if(sr->spill.trigger != 0) return true;
+
+  // From CAFAna/Cuts/SpillCuts.h, except that I do *not* want to
+  // drop low POT spills.
+  return fabs(sr->spill.deltaspilltimensec) < 0.5e9 &&
+         sr->spill.hornI >= -202 && sr->spill.hornI <= -198 &&
+         sr->spill.posx >= -2.00 && sr->spill.posx <= +2.00 &&
+         sr->spill.posy >= -2.00 && sr->spill.posy <= +2.00 &&
+         sr->spill.widthx >= 0.57 && sr->spill.widthx <= 1.58 &&
+         sr->spill.widthy >= 0.57 && sr->spill.widthy <= 1.58;
+}
+
+
 // Return true iff this slice is numu-contained
 static bool containedND(const art::Ptr<caf::StandardRecord> sr)
 {
@@ -1213,6 +1231,10 @@ void PostMuon::analyze(const art::Event& evt)
 
     if(slice2caf.isValid()){
       const art::Ptr<caf::StandardRecord> sr = slice2caf.at(t.slice);
+      if(!goodspill(sr)){
+        printf("Skipping bad spill\n");
+        return;
+      }
       t.contained_slice = containedND(sr);
       t.cvn = sr->sel.cvn.numuid;
 

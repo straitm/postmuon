@@ -1417,13 +1417,15 @@ void PostMuon::analyze(const art::Event& evt)
     tinfo.time = mean_late_track_time(trk);
     tinfo.dother = make_dother(tinfo, slice);
 
-    //cluster_search(all, einfo, sorted_hits, trkhits, tinfo);
-    //cluster_search(ex,  einfo, sorted_hits, trkhits, tinfo);
-    //cluster_search(ex2, einfo, sorted_hits, trkhits, tinfo);
     cluster_search(xt,  false, einfo, sorted_hits, trkhits, tinfo);
-    for(int O = 0; O < 1; O++)
+#if 0
+    cluster_search(all, false, einfo, sorted_hits, trkhits, tinfo);
+    cluster_search(ex,  false, einfo, sorted_hits, trkhits, tinfo);
+    cluster_search(ex2, false, einfo, sorted_hits, trkhits, tinfo);
+    cluster_search(x,   false, einfo, sorted_hits, trkhits, tinfo);
+    for(int O = 0; O < 4; O++)
       cluster_search(xt,  true,  einfo, sorted_hits, trkhits, tinfo);
-    //cluster_search(x,   einfo, sorted_hits, trkhits, tinfo);
+#endif
   }
 
   // if(neardet) // how do you test this?

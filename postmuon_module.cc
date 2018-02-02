@@ -1161,7 +1161,10 @@ void PostMuon::analyze(const art::Event& evt)
   evt.getByLabel("slicer", slice);
 
   art::Handle< std::vector<rb::Track> > tracks;
-  evt.getByLabel("kalmantrackmerge", tracks);
+  if(!evt.getByLabel("kalmantrackmerge", tracks)){
+    fprintf(stderr, "Could not get kalmantrackmerge\n");
+    return;
+  }
 
   // works better for cosmics (bizzarely), and also at connecting the last
   // bend of a pion track, but has no remid
@@ -1192,8 +1195,8 @@ void PostMuon::analyze(const art::Event& evt)
 
   ntuple_header(einfo);
 
-  if(rawtrigger->empty()) return;
-  if(tracks    ->empty()) return;
+  if(rawtrigger->empty()){ fprintf(stderr, "No raw trigger!\n"); return; }
+  if(tracks    ->size() == 0){ fprintf(stderr, "No tracks!\n"); return; }
 
   art::ServiceHandle<cheat::BackTracker> backtracker_thing;
   const sim::ParticleNavigator& pnav = backtracker_thing->ParticleNavigator();
@@ -1211,8 +1214,10 @@ void PostMuon::analyze(const art::Event& evt)
 
     if(rawtrigger->empty()) return;
 
-    if(!delta_and_length(event_length_tdc, delta_tdc, flatdaq, rawtrigger))
+    if(!delta_and_length(event_length_tdc, delta_tdc, flatdaq, rawtrigger)){
+      fprintf(stderr, "Could not get delta and length\n");
       return;
+    }
   }
   else{ // XXX
     event_length_tdc = 500 * 64;

@@ -9,6 +9,6 @@ include SoftRelTools/arch_spec_root.mk
 include SoftRelTools/arch_spec_ifdhart.mk
 include SoftRelTools/arch_spec_ifdhc.mk
 
-override CPPFLAGS := $(CPPFLAGS) -I$(NOVADAQ_INC) -I$(NUTOOLS_INC)
+override CPPFLAGS := $(CPPFLAGS) -I$(NOVADAQ_INC) -I$(NUTOOLS_INC) -I$(GENIE_INC)/GENIE
 
 override LIBLIBS += $(LOADLIBES)

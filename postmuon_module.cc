@@ -49,6 +49,11 @@
 #include "ReMId/ReMId.h"
 #include "ReMId/classes.h"
 
+// For MC cross-section weights
+#include "StandardRecord/Proxy/SRProxy.h"
+#include "StandardRecord/Proxy/CopyRecord.h"
+#include "CAFAna/Vars/GenieWeights.h"
+
 #include "GeometryObjects/PlaneGeo.h"
 
 #include <IFDH_service.h>
@@ -1249,11 +1254,25 @@ void PostMuon::analyze(const art::Event& evt)
       t.contained_slice = containedND(sr);
       t.cvn = sr->sel.cvn.numuid;
 
-      t.mcweight = sr->mc.nu.empty()?1:
-         (sr->mc.nu[0].rwgt.ppfx.cv *
-           // I heard on Slack that this was the right formula for Xsec
-           // weights.
-           (sr->mc.nu[0].inttype == simb::kMEC? 0.9: 1));
+      static caf::SRProxy srProxy(0, "");
+      CopyRecord(*sr, srProxy);
+
+      if(sr->mc.nu.empty()){
+        t.mcweight = 1;
+      }
+      else{
+        t.mcweight = 0;
+        // Take the average for slices with multiple neutrino interactions.
+        // But typically there is just one.
+        for(unsigned int truthi = 0; truthi < sr->mc.nu.size(); truthi++)
+          t.mcweight +=
+            // This is the correct weight for the flux as of 2018-02-01.
+            // https://neutrino.slack.com/archives/C02FS4L15/p1517526480000156
+            sr->mc.nu[truthi].rwgt.ppfx.cv *
+            // Chris Backhouse told me on Slack to do this
+            // https://neutrino.slack.com/archives/C02FS4L15/p1517528737000298
+            ana::kXSecCVWgt2018(&srProxy)/sr->mc.nu.size();
+      }
     }
 
     t.true_pdg = t.true_nupdg = t.true_nucc = t.true_atom_cap

@@ -27,8 +27,6 @@
 #include "art/Framework/Principal/Handle.h"
 #include "fhiclcpp/ParameterSet.h"
 #include "art/Framework/Core/ModuleMacros.h"
-#include "art/Framework/Core/FindManyP.h"
-#include "art/Framework/Core/FindOneP.h"
 #include "Utilities/AssociationUtil.h"
 
 #include "Metadata/MetadataManager.h"
@@ -1443,7 +1441,7 @@ void PostMuon::analyze(const art::Event& evt)
       offspacetrk[j].pop_front();
 }
 
-DEFINE_ART_MODULE(PostMuon);
+DEFINE_ART_MODULE(PostMuon)
 
 } // end namespace PostMuon
 //////////////////////////////////////////////////////////////////////////

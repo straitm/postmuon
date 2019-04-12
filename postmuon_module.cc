@@ -965,7 +965,9 @@ static bool delta_and_length(int64_t & event_length_tdc,
 static void ntuple_header(const evtinfo & einfo)
 {
   if(OUT == NULL){
-    OUT = fopen(Form("postmuon_%d_%d_%d.ntuple",
+    char * csd = getenv("_CONDOR_SCRATCH_DIR");
+    OUT = fopen(Form("%s%spostmuon_%d_%d_%d.ntuple",
+                     csd == NULL?"":csd, csd == NULL?"":"/",
                      einfo.run, einfo.subrun, einfo.cycle), "w");
     if(OUT == NULL){
        fprintf(stderr, "Could not open output ntuple file\n");

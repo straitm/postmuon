@@ -51,6 +51,7 @@
 #include "StandardRecord/Proxy/SRProxy.h"
 #include "StandardRecord/Proxy/CopyRecord.h"
 #include "CAFAna/Vars/GenieWeights.h"
+#include "CAFAna/Vars/XsecTunes.h"
 
 #include "GeometryObjects/PlaneGeo.h"
 

@@ -13,6 +13,7 @@ services:
   # Load the service that manages root files for histograms.
   TFileService: { fileName: "histos.root"            }
   scheduler:    { wantSummary: true }
+  TimeTracker:  { printSummary: true }
   message:      @local::standard_out
   Calibrator:   @local::standard_calibrator
   BackTracker:   @local::standard_backtracker

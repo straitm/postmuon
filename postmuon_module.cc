@@ -474,6 +474,11 @@ static float dist_trackend_to_cell(const trkinfo & __restrict__ tinfo,
   return sqrt(pow(dplane, 2) + pow(dcell, 2));
 }
 
+// Return the shortest difference between the end of the track 'tinfo'
+// and the nearest hit in another physics slice.
+//
+// TODO: this seems not to be so useful, but maybe if we looked for the
+// shortest distance to another slice's vertex or track end it would be.
 static float make_dother(const trkinfo & __restrict__ tinfo,
   const art::Handle< std::vector<rb::Cluster> > & __restrict__ slice)
 {
